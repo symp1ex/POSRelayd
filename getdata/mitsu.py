@@ -433,11 +433,21 @@ class MitsuGetData(MitsuConnect):
 
             fnExecution = self.get_value_by_tag(fn_data, "EDITION=")
             hostname = self.get_hostname()
-            url_rms = get_remote_id.get_server_url()
             teamviever_id = get_remote_id.get_teamviewer_id()
-            anydesk_id = get_remote_id.get_anydesk_id()
             litemanager_id = get_remote_id.get_litemanager_id()
             get_current_time = self.current_time()
+
+            try:
+                url_rms = get_remote_id.get_server_url()
+            except Exception:
+                service.logger.kkt.error(f"Не удалось сохранить адреc rms-сервера", exc_info=True)
+                url_rms = "Error"
+
+            try:
+                anydesk_id = get_remote_id.get_anydesk_id()
+            except Exception:
+                service.logger.kkt.error(f"Не удалось сохранить ID anydesk", exc_info=True)
+                anydesk_id = "Error"
 
             date_json = {
                 "modelName": modelName,

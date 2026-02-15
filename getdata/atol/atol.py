@@ -275,14 +275,25 @@ def get_date_non_kkt():
 def get_remote():
     try:
         hostname = processmanager.get_hostname()
-        url_rms = get_remote_id.get_server_url()
         teamviever_id = get_remote_id.get_teamviewer_id()
-        anydesk_id = get_remote_id.get_anydesk_id()
         litemanager_id = get_remote_id.get_litemanager_id()
+
+        try:
+            url_rms = get_remote_id.get_server_url()
+        except Exception:
+            service.logger.kkt.error(f"Не удалось сохранить адреc rms-сервера", exc_info=True)
+            url_rms = "Error"
+
+        try:
+            anydesk_id = get_remote_id.get_anydesk_id()
+        except Exception:
+            service.logger.kkt.error(f"Не удалось сохранить ID anydesk", exc_info=True)
+            anydesk_id = "Error"
 
         return hostname, url_rms, teamviever_id, anydesk_id, litemanager_id
     except Exception:
         service.logger.kkt.error(f"Не удалось получить данные с хоста", exc_info=True)
+        return None, None, None, None, None
 
 def get_atol_data():
     fptr10_path = os.path.join(about.current_path, "fptr10.dll")

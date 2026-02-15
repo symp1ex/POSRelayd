@@ -83,12 +83,9 @@ class AnyRemoteId:
 
 
     def get_server_url(self):
-        if AnyRemoteId.server_url != None:
-            return AnyRemoteId.server_url
-
         target_folder_path = "iiko\\cashserver"
 
-        if self.user_appdata == None:
+        if AnyRemoteId.user_appdata == None:
             self.get_user_appdata(target_folder_path)
 
         xml_path = os.path.join(str(self.user_appdata), 'iiko', 'Cashserver', 'config.xml')
@@ -114,7 +111,7 @@ class AnyRemoteId:
 
         target_folder_path = "anydesk"
 
-        if self.user_appdata == None:
+        if AnyRemoteId.user_appdata == None:
             self.get_user_appdata(target_folder_path)
 
         conf_path = os.path.join(str(self.user_appdata), 'anydesk', 'system.conf')
