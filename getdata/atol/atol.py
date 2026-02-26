@@ -256,6 +256,7 @@ def get_date_kkt(fptr, IFptr, port, installed_version):
 def get_date_non_kkt():
     hostname, url_rms, teamviever_id, anydesk_id, litemanager_id = get_remote()
     get_current_time = processmanager.current_time()
+    uuid = processmanager.get_uuid()
 
     date_json = {
         "hostname": str(hostname),
@@ -265,11 +266,11 @@ def get_date_non_kkt():
         "litemanager_id": str(litemanager_id),
         "current_time": str(get_current_time),
         "vc": str(about.version),
-        "uuid": processmanager.get_uuid()
+        "uuid": uuid
     }
     folder_name = "date"
     folder_path = os.path.join(about.current_path, folder_name)
-    json_name = f"TV{teamviever_id}_AD{anydesk_id}.json"
+    json_name = f"{uuid}.json"
     service.configs.create_json_file(folder_path, json_name, date_json)
 
 def get_remote():

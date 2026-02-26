@@ -83,27 +83,36 @@ class AnyRemoteId:
 
 
     def get_server_url(self):
-        target_folder_path = "iiko\\cashserver"
+        server_url_folder_path = "iiko\\cashserver"
 
-        if AnyRemoteId.user_appdata == None:
-            self.get_user_appdata(target_folder_path)
+        def server(server_url_folder_path):
+            if AnyRemoteId.user_appdata == None:
+                self.get_user_appdata(server_url_folder_path)
 
-        xml_path = os.path.join(str(self.user_appdata), 'iiko', 'Cashserver', 'config.xml')
-        try:
-            # Загрузка XML-файла
-            tree = ET.parse(xml_path)
-            root = tree.getroot()
+            xml_path = os.path.join(str(self.user_appdata), server_url_folder_path, 'config.xml')
+            try:
+                # Загрузка XML-файла
+                tree = ET.parse(xml_path)
+                root = tree.getroot()
 
-            # Находим элемент <serverUrl>
-            server_url_element = root.find('serverUrl')
+                # Находим элемент <serverUrl>
+                server_url_element = root.find('serverUrl')
 
-            # Получаем текст из элемента <serverUrl>
-            AnyRemoteId.server_url = server_url_element.text
+                # Получаем текст из элемента <serverUrl>
+                AnyRemoteId.server_url = server_url_element.text
+            except FileNotFoundError:
+                service.logger.logger_service.warn(f"Файл '{xml_path}' не найден.", exc_info=True)
+            except Exception:
+                service.logger.logger_service.error(f"Произошла ошибка при чтении файла 'cashserver/config.xml'", exc_info=True)
+
+        server(server_url_folder_path)
+
+        if AnyRemoteId.server_url != None:
             return AnyRemoteId.server_url
-        except FileNotFoundError:
-            service.logger.logger_service.warn(f"Файл '{xml_path}' не найден.")
-        except Exception:
-            service.logger.logger_service.error(f"Произошла ошибка при чтении файла 'cashserver/config.xml'", exc_info=True)
+        else:
+            server_url_folder_path = "syrve\\cashserver"
+            server(server_url_folder_path)
+            return AnyRemoteId.server_url
 
     def get_anydesk_id(self):
         if AnyRemoteId.anydesk_id != None:
