@@ -434,6 +434,7 @@ class MitsuGetData(MitsuConnect):
             fnExecution = self.get_value_by_tag(fn_data, "EDITION=")
             hostname = self.get_hostname()
             teamviever_id = get_remote_id.get_teamviewer_id()
+            rustdesk_id = get_remote_id.get_rustdesk_id()
             litemanager_id = get_remote_id.get_litemanager_id()
             get_current_time = self.current_time()
 
@@ -471,6 +472,7 @@ class MitsuGetData(MitsuConnect):
                 "url_rms": str(url_rms),
                 "teamviewer_id": str(teamviever_id),
                 "anydesk_id": str(anydesk_id),
+                "rustdesk_id": str(rustdesk_id),
                 "litemanager_id": str(litemanager_id),
                 "current_time": str(get_current_time),
                 "v_time": str(get_current_time),

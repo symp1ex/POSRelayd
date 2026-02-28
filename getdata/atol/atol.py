@@ -1,4 +1,4 @@
-import service.logger 
+import service.logger
 import service.configs
 import service.sys_manager
 import getdata.get_remote
@@ -10,6 +10,7 @@ import os
 processmanager = service.sys_manager.ProcessManagement()
 get_remote_id = getdata.get_remote.AnyRemoteId()
 
+
 def get_driver_version():
     file_path = "C:\\Program Files (x86)\\ATOL\\Drivers10\\KKT\\bin\\fptr10.dll"
     if not os.path.exists(file_path):
@@ -18,12 +19,14 @@ def get_driver_version():
     driver_version = processmanager.get_file_version(file_path)
     return driver_version
 
+
 def file_exists_in_root(filename):
     try:
         root_path = os.path.join(os.getcwd(), filename)  # Получаем путь к файлу в корне
         return os.path.isfile(root_path)  # Возвращает True, если файл существует, иначе False
     except Exception:
         service.logger.kkt.error(f"Не удалось проверить наличие {filename}", exc_info=True)
+
 
 def status_connect(fptr, port):
     try:
@@ -38,6 +41,7 @@ def status_connect(fptr, port):
     except Exception:
         service.logger.kkt.error(f"Не удалось проверить статус соединения", exc_info=True)
 
+
 def checkstatus_getdate(fptr, IFptr, port, installed_version):
     try:
         isOpened = status_connect(fptr, port)  # првоверяем статус подключения к ККТ
@@ -47,12 +51,15 @@ def checkstatus_getdate(fptr, IFptr, port, installed_version):
             del fptr
             return isOpened
     except Exception:
-        service.logger.kkt.error(f"Не удалось получить данные из-за ошибки при проверке статуса подключения", exc_info=True)
+        service.logger.kkt.error(f"Не удалось получить данные из-за ошибки при проверке статуса подключения",
+                                 exc_info=True)
+
 
 def connect_kkt(fptr, IFptr, index):
     try:
         file_name = "connect.json"
-        config = service.configs.read_config_file(about.current_path, file_name, service.configs.connect_data, create=True) or {}  # если нет конфигурации, используем пустой словарь
+        config = service.configs.read_config_file(about.current_path, file_name, service.configs.connect_data,
+                                                  create=True) or {}  # если нет конфигурации, используем пустой словарь
         connections = config.get("atol")
 
         settings_map = {
@@ -61,7 +68,9 @@ def connect_kkt(fptr, IFptr, index):
                 IFptr.LIBFPTR_SETTING_PORT: IFptr.LIBFPTR_PORT_COM,
                 IFptr.LIBFPTR_SETTING_COM_FILE: connections[index].get("com_port"),
                 IFptr.LIBFPTR_SETTING_BAUDRATE: getattr(IFptr,
-                                                        "LIBFPTR_PORT_BR_" + str(connections[index].get("com_baudrate"))) if connections[index].get(
+                                                        "LIBFPTR_PORT_BR_" + str(
+                                                            connections[index].get("com_baudrate"))) if connections[
+                    index].get(
                     "com_baudrate") else None
             },
             2: {
@@ -72,7 +81,8 @@ def connect_kkt(fptr, IFptr, index):
             }
         }
 
-        settings = settings_map.get(connections[index].get("type_connect"), {})  # Получаем настройки по типу подключения
+        settings = settings_map.get(connections[index].get("type_connect"),
+                                    {})  # Получаем настройки по типу подключения
         if not settings:  # Если тип подключения не определен в конфигурации
             settings = {
                 IFptr.LIBFPTR_SETTING_MODEL: str(IFptr.LIBFPTR_MODEL_ATOL_AUTO),
@@ -92,6 +102,7 @@ def connect_kkt(fptr, IFptr, index):
             return settings.get(IFptr.LIBFPTR_SETTING_COM_FILE, None) or ip_with_port
     except Exception:
         service.logger.kkt.error(f"Не удалось установить соединение с ККТ", exc_info=True)
+
 
 def get_date_kkt(fptr, IFptr, port, installed_version):
     try:
@@ -166,7 +177,6 @@ def get_date_kkt(fptr, IFptr, port, installed_version):
 
         bootVersion = fptr.getParamString(IFptr.LIBFPTR_PARAM_UNIT_VERSION)
 
-
         # запрос версии ФФД
         fptr.setParam(IFptr.LIBFPTR_PARAM_FN_DATA_TYPE, IFptr.LIBFPTR_FNDT_FFD_VERSIONS)
         fptr.fnQueryData()
@@ -213,7 +223,7 @@ def get_date_kkt(fptr, IFptr, port, installed_version):
     service.logger.kkt.info(f"Данные от ККТ получены")
 
     try:
-        hostname, url_rms, teamviever_id, anydesk_id, litemanager_id = get_remote()
+        hostname, url_rms, teamviever_id, rustdesk_id, anydesk_id, litemanager_id = get_remote()
         get_current_time = processmanager.current_time()
 
         date_json = {
@@ -238,6 +248,7 @@ def get_date_kkt(fptr, IFptr, port, installed_version):
             "url_rms": str(url_rms),
             "teamviewer_id": str(teamviever_id),
             "anydesk_id": str(anydesk_id),
+            "rustdesk_id": str(rustdesk_id),
             "litemanager_id": str(litemanager_id),
             "current_time": str(get_current_time),
             "v_time": str(get_current_time),
@@ -253,8 +264,9 @@ def get_date_kkt(fptr, IFptr, port, installed_version):
 
     processmanager.update_correlation_fiscals(serialNumber, fn_serial, get_current_time, "atol")
 
+
 def get_date_non_kkt():
-    hostname, url_rms, teamviever_id, anydesk_id, litemanager_id = get_remote()
+    hostname, url_rms, teamviever_id, rustdesk_id, anydesk_id, litemanager_id = get_remote()
     get_current_time = processmanager.current_time()
     uuid = processmanager.get_uuid()
 
@@ -263,6 +275,7 @@ def get_date_non_kkt():
         "url_rms": str(url_rms),
         "teamviewer_id": str(teamviever_id),
         "anydesk_id": str(anydesk_id),
+        "rustdesk_id": str(rustdesk_id),
         "litemanager_id": str(litemanager_id),
         "current_time": str(get_current_time),
         "vc": str(about.version),
@@ -273,10 +286,12 @@ def get_date_non_kkt():
     json_name = f"{uuid}.json"
     service.configs.create_json_file(folder_path, json_name, date_json)
 
+
 def get_remote():
     try:
         hostname = processmanager.get_hostname()
         teamviever_id = get_remote_id.get_teamviewer_id()
+        rustdesk_id = get_remote_id.get_rustdesk_id()
         litemanager_id = get_remote_id.get_litemanager_id()
 
         try:
@@ -291,10 +306,11 @@ def get_remote():
             service.logger.kkt.error(f"Не удалось сохранить ID anydesk", exc_info=True)
             anydesk_id = "Error"
 
-        return hostname, url_rms, teamviever_id, anydesk_id, litemanager_id
+        return hostname, url_rms, teamviever_id, rustdesk_id, anydesk_id, litemanager_id
     except Exception:
         service.logger.kkt.error(f"Не удалось получить данные с хоста", exc_info=True)
         return None, None, None, None, None
+
 
 def get_atol_data():
     fptr10_path = os.path.join(about.current_path, "fptr10.dll")
@@ -349,7 +365,7 @@ def get_atol_data():
 
     try:
         if config is not None and not FR_0 == 0:
-            port = connect_kkt(fptr, IFptr, 0) # подключаемся к ККТ
+            port = connect_kkt(fptr, IFptr, 0)  # подключаемся к ККТ
             isOpened = status_connect(fptr, port)
             if isOpened == 1:
                 processmanager.rm_old_date()
@@ -406,4 +422,3 @@ def get_atol_data():
                 get_date_non_kkt()
     except Exception:
         service.logger.kkt.error(f"Не удалось подключиться к ККТ", exc_info=True)
-        

@@ -4,11 +4,13 @@ import winreg
 import service.logger
 import win32ts
 import win32security
+import subprocess
 
 class AnyRemoteId:
     user_appdata = None
     server_url = None
     teamviewer_id = None
+    rustdesk_id = None
     anydesk_id = None
     litemanager_id = None
 
@@ -114,6 +116,37 @@ class AnyRemoteId:
             server(server_url_folder_path)
             return AnyRemoteId.server_url
 
+    def get_rustdesk_id(self):
+        if AnyRemoteId.rustdesk_id != None:
+            return AnyRemoteId.rustdesk_id
+
+        # Путь к исполняемому файлу
+        exe_path = r"C:\Program Files\RustDesk\rustdesk.exe"
+
+        # Проверяем, существует ли файл по указанному пути
+        if not os.path.exists(exe_path):
+            return None
+        try:
+            # Запускаем процесс и перехватываем вывод
+            # capture_output=True — сохраняет стандартный вывод (stdout)
+            # text=True — возвращает результат как строку, а не байты
+            result = subprocess.run([exe_path, "--get-id"], capture_output=True, text=True, check=True)
+
+            lines = result.stdout.strip().splitlines()
+
+            rustdesk_id = lines[-1].strip()
+            AnyRemoteId.rustdesk_id = rustdesk_id
+
+            return AnyRemoteId.rustdesk_id
+        except subprocess.CalledProcessError:
+            service.logger.logger_service.error(f'Не удалось выполнить запрос на получение RustDesk_id',
+                                                exc_info=True)
+            return None
+        except Exception:
+            service.logger.logger_service.error(f'Не удалось получить RustDesk_id',
+                                                exc_info=True)
+            return None
+
     def get_anydesk_id(self):
         if AnyRemoteId.anydesk_id != None:
             return AnyRemoteId.anydesk_id
@@ -136,7 +169,7 @@ class AnyRemoteId:
         except FileNotFoundError:
             service.logger.logger_service.warn(f"Файл '{conf_path}' не найден.")
         except Exception:
-            service.logger.logger_service.error(f'Error: ошибка при получении anydesk_id из {conf_path}',
+            service.logger.logger_service.error(f'Не удалось получить anydesk_id из {conf_path}',
                                                 exc_info=True)
 
     def get_teamviewer_id(self):
