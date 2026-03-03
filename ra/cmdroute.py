@@ -197,6 +197,10 @@ class CMDClient(service.sys_manager.ResourceManagement):
             while True:
                 time.sleep(0.1)
 
+                if not (self.ws and self.ws.sock and self.ws.sock.connected):
+                    service.logger.logger_service.debug("Выход из потока вывода: WebSocket закрыт")
+                    return
+
                 if admin_id not in self.sessions:
                     return
 
@@ -291,11 +295,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
                     on_error=self.on_error,
                 )
 
-                self.ws.run_forever(
-                    ping_interval=30,
-                    ping_timeout=10,
-                    ping_payload="ping"
-                )
+                self.ws.run_forever()
             except Exception:
                 service.logger.logger_service.error("WebSocket error", exc_info=True)
 
