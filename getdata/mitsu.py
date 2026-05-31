@@ -450,6 +450,8 @@ class MitsuGetData(MitsuConnect):
                 service.logger.kkt.error(f"Не удалось сохранить ID anydesk", exc_info=True)
                 anydesk_id = "Error"
 
+            pr_id = get_remote_id.get_self_id()
+
             date_json = {
                 "modelName": modelName,
                 "serialNumber": str(serialNumber),
@@ -474,6 +476,7 @@ class MitsuGetData(MitsuConnect):
                 "anydesk_id": str(anydesk_id),
                 "rustdesk_id": str(rustdesk_id),
                 "litemanager_id": str(litemanager_id),
+                "pr_id": str(pr_id),
                 "current_time": str(get_current_time),
                 "v_time": str(get_current_time),
                 "vc": str(about.version),

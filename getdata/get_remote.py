@@ -5,6 +5,8 @@ import service.logger
 import win32ts
 import win32security
 import subprocess
+import service.configs
+import about
 
 class AnyRemoteId:
     user_appdata = None
@@ -247,3 +249,15 @@ class AnyRemoteId:
             service.logger.logger_service.warn('Реестровый ключ "ID (read only)" для LiteManager не найден.')
         except Exception:
             service.logger.logger_service.error(f"Произошла ошибка при чтении реестра", exc_info=True)
+
+    def get_self_id(self):
+        try:
+            config_ra_path = os.path.join(about.current_path, "_resources")
+            config_ra = service.configs.read_config_file(config_ra_path, "remote-access.json",
+                                                         service.configs.ra_config, create=True)
+            self_id = config_ra.get("id", "None")
+
+            return self_id
+        except Exception:
+            service.logger.logger_service.error(f"Не удалось прочитать id из 'remote-access.json'", exc_info=True)
+            return "None"

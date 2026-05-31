@@ -62,10 +62,15 @@ class CMDClient(service.sys_manager.ResourceManagement):
             f"WebSocket error: {error}"
         )
 
-    def save_temp_pass(self, temp_pass: str):
-        service.logger.logger_service.debug(f"Получен временный пароль: {temp_pass}")
-        self.config_ra["temp_pass"] = temp_pass
-        service.configs.write_json_file(self.config_ra, self.config_ra_path)
+    def save_pass_and_code(self, data: str, type):
+        if type == "pass":
+            service.logger.logger_service.debug(f"Получен временный пароль: {data}")
+            self.config_ra["temp_pass"] = data
+            service.configs.write_json_file(self.config_ra, self.config_ra_path)
+        if type == "code":
+            service.logger.logger_service.debug(f"Получен id-клиента: {data}")
+            self.config_ra["id"] = data
+            service.configs.write_json_file(self.config_ra, self.config_ra_path)
 
     def on_open(self, ws):
         service.logger.logger_service.info("Соединение с NoIP-сервером установлено, WebSocket открыт")
@@ -96,8 +101,13 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 return
 
             if msg["type"] == "temp_pass":
-                self.save_temp_pass(msg["temp_pass"])
-                service.logger.logger_service.debugп("Received temp_pass from server")
+                self.save_pass_and_code(msg["temp_pass"], "pass")
+                service.logger.logger_service.debug("Received 'temp_pass' from server")
+                return
+
+            if msg["type"] == "client_code":
+                self.save_pass_and_code(msg["client_code"], "code")
+                service.logger.logger_service.debug("Received 'client_code' from server")
                 return
 
             if msg["type"] == "admin_attach":

@@ -226,6 +226,8 @@ def get_date_kkt(fptr, IFptr, port, installed_version):
         hostname, url_rms, teamviever_id, rustdesk_id, anydesk_id, litemanager_id = get_remote()
         get_current_time = processmanager.current_time()
 
+        pr_id = get_remote_id.get_self_id()
+
         date_json = {
             "modelName": str(modelName),
             "serialNumber": str(serialNumber),
@@ -250,6 +252,7 @@ def get_date_kkt(fptr, IFptr, port, installed_version):
             "anydesk_id": str(anydesk_id),
             "rustdesk_id": str(rustdesk_id),
             "litemanager_id": str(litemanager_id),
+            "pr_id": str(pr_id),
             "current_time": str(get_current_time),
             "v_time": str(get_current_time),
             "vc": str(about.version),
@@ -270,6 +273,10 @@ def get_date_non_kkt():
     get_current_time = processmanager.current_time()
     uuid = processmanager.get_uuid()
 
+    pr_id = get_remote_id.get_self_id()
+
+
+
     date_json = {
         "hostname": str(hostname),
         "url_rms": str(url_rms),
@@ -277,6 +284,7 @@ def get_date_non_kkt():
         "anydesk_id": str(anydesk_id),
         "rustdesk_id": str(rustdesk_id),
         "litemanager_id": str(litemanager_id),
+        "pr_id": str(pr_id),
         "current_time": str(get_current_time),
         "vc": str(about.version),
         "uuid": uuid

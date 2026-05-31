@@ -79,6 +79,7 @@ class ValidationFn(service.sys_manager.ProcessManagement):
 
 
                 json_file["rustdesk_id"] = str(get_remote_id.get_rustdesk_id())
+                json_file["pr_id"] = str(get_remote_id.get_self_id())
                 json_file["url_rms"] = get_remote_id.get_server_url()
                 json_file["vc"] = about.version
                 json_file["uuid"] = self.get_uuid()
