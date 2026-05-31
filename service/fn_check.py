@@ -77,9 +77,8 @@ class ValidationFn(service.sys_manager.ProcessManagement):
                 elif model_kkt == "mitsu":
                     json_file["installed_driver"] = str(mitsu.get_driver_version())
 
-                if "rustdesk_id" not in json_file:
-                    json_file["rustdesk_id"] = str(get_remote_id.get_rustdesk_id())
 
+                json_file["rustdesk_id"] = str(get_remote_id.get_rustdesk_id())
                 json_file["url_rms"] = get_remote_id.get_server_url()
                 json_file["vc"] = about.version
                 json_file["uuid"] = self.get_uuid()
@@ -113,7 +112,7 @@ class ValidationFn(service.sys_manager.ProcessManagement):
                 target_hour, target_minute = map(int, self.target_time.split(':'))
             except Exception:
                 service.logger.logger_service.warn("Не удалось получить из конфига время следующей перезагрузки, "
-                                                   "будет использовано дефолтное значение", exc_info=True)
+                                                   "будет использовано стандартное значение", exc_info=True)
                 target_hour = 5
                 target_minute = 30
             service.logger.logger_service.debug(f"Получено время следующей перезагрузки: {target_hour}:"

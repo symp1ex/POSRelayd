@@ -37,14 +37,6 @@ class CMDClient(service.sys_manager.ResourceManagement):
         self.sessions = {}  # admin_id -> CmdContextManager
         self.waiting_keypress = {}
 
-        self.ws = WebSocketApp(
-            self.server_ws,
-            on_open=self.on_open,
-            on_message=self.on_message,
-            on_close=self.on_close,
-            on_error=self.on_error,
-        )
-
     def get_connection_data(self):
         try:
             if self.encryption_enabled == True:
@@ -97,42 +89,38 @@ class CMDClient(service.sys_manager.ResourceManagement):
                                                 exc_info=True)
 
     def on_message(self, ws, message):
-        msg = json.loads(message)
+        try:
+            msg = json.loads(message)
+            if msg.get("type") == "error":
+                service.logger.logger_service.error(f"Ошибка от сервера: {msg.get('error')}")
+                return
 
-        if msg.get("type") == "error":
-            service.logger.logger_service.error(
-                f"Ошибка от сервера: {msg.get('error')}"
-            )
-            return
+            if msg["type"] == "temp_pass":
+                self.save_temp_pass(msg["temp_pass"])
+                service.logger.logger_service.debugп("Received temp_pass from server")
+                return
 
-        if msg["type"] == "temp_pass":
-            self.save_temp_pass(msg["temp_pass"])
-            print("Received temp_pass from server")
-            return
+            if msg["type"] == "admin_attach":
+                admin_id = msg["id"]
+                threading.Thread(target=self.admin_session, args=(admin_id,), daemon=True).start()
 
-        if msg["type"] == "admin_attach":
-            admin_id = msg["id"]
-            threading.Thread(
-                target=self.admin_session,
-                args=(admin_id,),
-                daemon=True
-            ).start()
+            elif msg["type"] == "admin_detach":
+                admin_id = msg["id"]
+                session = self.sessions.pop(admin_id, None)
+                if session:
+                    session.__exit__(None, None, None)
+                    service.logger.logger_service.debug("Получено сообщение на отключение клиента")
+                    service.logger.logger_service.debug(f"admin_id '{admin_id}'")
 
-        elif msg["type"] == "admin_detach":
-            admin_id = msg["id"]
-            session = self.sessions.pop(admin_id, None)
-            if session:
-                session.__exit__(None, None, None)
-            service.logger.logger_service.debug("Получено сообщение на отключение клиента")
-            service.logger.logger_service.debug(f"admin_id '{admin_id}'")
+            elif msg["type"] == "command":
+                self.execute(msg["id"], ws, msg["command"], msg["command_id"])
 
-        elif msg["type"] == "command":
-            self.execute(msg["id"], ws, msg["command"], msg["command_id"])
-
-        elif msg["type"] == "control":
-            if msg.get("command") == "CTRL_C":
-                service.logger.logger_service.debug("Получена команда 'Ctrl+C'")
-                self.send_ctrl_c(msg["id"])
+            elif msg["type"] == "control":
+                if msg.get("command") == "CTRL_C":
+                    service.logger.logger_service.debug("Получена команда 'Ctrl+C'")
+                    self.send_ctrl_c(msg["id"])
+        except Exception as e:
+            service.logger.logger_service.error(f"Ошибка при обработке сообщения WS: {e}", exc_info=True)
 
     def admin_session(self, admin_id):
         try:
@@ -287,6 +275,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
     def run(self, service_instance):
         while service_instance.is_running and self.ra_enabled:
             try:
+                # Создаем объект только внутри цикла
                 self.ws = WebSocketApp(
                     self.server_ws,
                     on_open=self.on_open,
@@ -294,14 +283,16 @@ class CMDClient(service.sys_manager.ResourceManagement):
                     on_close=self.on_close,
                     on_error=self.on_error,
                 )
+                # ping_interval — клиент сам проверяет связь
+                self.ws.run_forever(ping_interval=20, ping_timeout=10)
+            except Exception as e:
+                service.logger.logger_service.error(f"WebSocket loop crash: {e}")
 
-                self.ws.run_forever()
-            except Exception:
-                service.logger.logger_service.error("WebSocket error", exc_info=True)
-
+            # Если вышли из run_forever — пишем в лог
             service.logger.logger_service.warning(
-                "Соединение с NoIP-сервером потеряно, повторная попытка подключения через 10 секунд...")
+                "Соединение с NoIP-сервером разорвано, повторная попытка через 10 секунд...")
 
+            # Ожидание перед реконнектом
             rc = win32event.WaitForSingleObject(service_instance.hWaitStop, 10000)
             if rc == win32event.WAIT_OBJECT_0:
                 break
