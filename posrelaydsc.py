@@ -66,6 +66,8 @@ def run_without_arguments():
 
 def checking_launch_arguments():
     if "--pass" in sys.argv:
+        validation_fn.clean_uuid()
+
         try:
             idx = sys.argv.index("--pass")
             password = sys.argv[idx + 1]
@@ -208,6 +210,8 @@ class Service(win32serviceutil.ServiceFramework):
         self.main()
 
     def main(self):
+        validation_fn.clean_uuid()
+
         try:
             self.cmdclient_init()
 

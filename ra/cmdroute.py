@@ -63,14 +63,30 @@ class CMDClient(service.sys_manager.ResourceManagement):
         )
 
     def save_pass_and_code(self, data: str, type):
-        if type == "pass":
-            service.logger.logger_service.debug(f"Получен временный пароль: {data}")
-            self.config_ra["temp_pass"] = data
-            service.configs.write_json_file(self.config_ra, self.config_ra_path)
-        if type == "code":
-            service.logger.logger_service.debug(f"Получен id-клиента: {data}")
-            self.config_ra["id"] = data
-            service.configs.write_json_file(self.config_ra, self.config_ra_path)
+        try:
+            if type == "pass":
+                service.logger.logger_service.debug(f"Получен временный пароль: {data}")
+                self.config_ra["temp_pass"] = data
+                service.configs.write_json_file(self.config_ra, self.config_ra_path)
+            if type == "code":
+                service.logger.logger_service.debug(f"Получен id-клиента: {data}")
+                self.config_ra["id"] = str(data)
+                service.configs.write_json_file(self.config_ra, self.config_ra_path)
+
+                json_name = f"{self.client_id}.json"
+                dir_path = os.path.join(about.current_path, "date")
+                file_path = os.path.join(about.current_path, "date", json_name)
+
+                if os.path.exists(file_path):
+                    uuid_json = service.configs.read_config_file(dir_path, json_name, "")
+                    uuid_check = uuid_json.get("pr_id", "-")
+                    if uuid_check == "-":
+                        uuid_json["pr_id"] = str(data)
+                        service.configs.write_json_file(uuid_json, file_path)
+                        service.logger.logger_service.debug(f"Обновлён собственный ID в '{json_name}'")
+        except Exception:
+            service.logger.logger_service.error(f"Попытка обновить данные в 'remote-access.json' завершилась неудачей",
+                                                exc_info=True)
 
     def on_open(self, ws):
         service.logger.logger_service.info("Соединение с NoIP-сервером установлено, WebSocket открыт")
@@ -300,9 +316,9 @@ class CMDClient(service.sys_manager.ResourceManagement):
 
             # Если вышли из run_forever — пишем в лог
             service.logger.logger_service.warning(
-                "Соединение с NoIP-сервером разорвано, повторная попытка через 10 секунд...")
+                "Соединение с NoIP-сервером разорвано, повторная попытка через 15 секунд...")
 
             # Ожидание перед реконнектом
-            rc = win32event.WaitForSingleObject(service_instance.hWaitStop, 10000)
+            rc = win32event.WaitForSingleObject(service_instance.hWaitStop, 15000)
             if rc == win32event.WAIT_OBJECT_0:
                 break

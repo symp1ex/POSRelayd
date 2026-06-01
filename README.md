@@ -1,7 +1,40 @@
-# POSRelayd-Service
+# POSRelayd
 
 ## Описание
-Утилита для автоматического получения данных с фискальных регистраторов Атол и Mitsu, работающая в режиме службы Windows. Поддерживается работа с двумя ФР.
+Служба предоставляет удалённый доступ к командной строке и автоматический сбор данных с фискальных регистраторов Атол и Mitsu. Поддерживается работа с несколькими ФР.
+
+### Удалённый доступ
+
+Маршрутизация происходит через удалённый сервер. Подключение к удалённым устройствам через отдельное клиентское приложение.
+
+**NoIP-сервер:**
+https://github.com/symp1ex/posrelayd-noip
+
+**Клиентское приложение:**
+https://github.com/symp1ex/POSRelayv
+
+Для включения функции необходимо поменять значение `enabled` на `true` в конфиге по пути `.\_resources\remote-access.json` (конфиг создаётся при первом запуске). В нём же хранятся `ID` для подключения и временный пароль.
+
+<details>
+<summary>Пример <b>remote-access.json</b></summary>
+
+```json
+{
+    "enabled": true,
+    "id": "-",
+    "temp_pass": "-"
+}
+```
+</details>
+</br>
+
+Чтобы задать постоянный пароль, нужно запустить исполняемый файл службы с аргументом **`--pass`**
+
+```bash
+posrelaydsc.exe --pass 112233
+```
+
+### Фискальные регистраторы
 
 Подключение к ФР происходит только при запуске службы. В остальное время служба, с заданным в днях интервалом, сопоставляет по свежим логам номер ФР к номеру ФН и отправляет на сервер подтверждение, если ФН всё ещё актуален. При обнаружении замены ФН планируется перезагрузка в ближайшую ночь, для повторного подключения и получения свежих данных от ФР.
 
@@ -166,6 +199,121 @@ pause
 
 ## Конфигурация
 
+### service.json
+<details>
+<summary>Настройки службы</summary>
+
+```json
+{
+    "service": {
+        "noip_connection": {
+            "encryption": false,
+            "url": "ws://10.127.33.42:22233/ws",
+            "api_key": ""
+        },
+        "updater": {
+            "enabled": true,
+            "file_name": "updater.exe"
+        },
+        "log_level": "info",
+        "log_days": 7
+    },
+    "sending_data": {
+        "enabled": true,
+        "url_list": [
+            {
+                "encryption": false,
+                "url": "https://server.com/api/submit_json",
+                "api_key": ""
+            }
+        ],
+        "max_attempts": 5,
+        "delay": 2
+    },
+    "validation_fn": {
+        "enabled": true,
+        "forced": false,
+        "reboot_file": "reboot.bat",
+        "interval": 8,
+        "trigger_days": 2,
+        "target_time": "05:30",
+        "delete_days": 25,
+        "atol": {
+            "logs_dir": "iiko",
+            "logs_mask_name": "AtolFiscalRegister",
+            "serialNumber_key": "serialNumber=",
+            "fnNumber_key": "fnNumber="
+        },
+        "mitsu": {
+            "logs_dir": "iiko",
+            "logs_mask_name": "MitsuCRPlugin",
+            "serialNumber_key": "SERIAL='",
+            "fnNumber_key": "FN='"
+        }
+    },
+    "shtrihscanner": {
+        "enabled": true,
+        "exe_name": "shtrihscanner.exe"
+    },
+    "notification": {
+        "enabled": false,
+        "authentication": {
+            "encryption": false,
+            "bot_token": "",
+            "chat_id": ""
+        },
+        "max_attempts": 5,
+        "delay": 10
+    }
+}
+```
+
+Параметры службы:
+- `encryption`: включение шифрования данных для подключения к NoIP-серверу
+- `url`: url-адрес NoIP-сервера
+- `api_key`: API-ключ для доступа к NoIP-серверу
+<br><br>
+- `updater_name`: имя исполняемого файла утилиты обновления, расположенного в `updater` (любой .exe или .bat файл)
+- `log_level`: уровень логирования
+- `log_days`: срок хранения логов (дни)
+
+Параметры передачи данных:
+- `enabled`: включение передачи данных API-запросом
+- `url_list`: список серверов для передачи, позволяет добавлять неограниченное количество серверов
+- `encryption`: включение шифрования данных для подключения к серверу (для каждого сервера в списке включается отдельно)
+- `url`: адрес сервера вместе с ручкой
+- `api_key`: API-ключ, передаваемый в заголовке запроса
+- `max_attempts`: максимум попыток передачи
+- `delay`: задержка между попытками
+
+Параметры проверки ФН:
+- `enabled`: включение проверки ФН
+- `forced`: позволяет пропустить сопоставление ФР к ФН по логам и сразу инициировать запуск `reboot_file` по настроенному ниже расписанию
+- `reboot_file`: имя файла скрипта, расположенного в `_resources`, который будет выполнен в указанное время при обнаружении замены ФН (любой .exe или .bat файл)
+- `interval`: интервал проверки (часы)
+- `trigger_days`: дней до повторного сопоставления ФР к ФН по логам или принудительного запуска `reboot_file` при включенном `forced`
+- `target_time`: время выполнения скрипта `reboot_file`, при `false` выполнение скрипта инициируется сразу
+- `delete_days`: дней до удаления неактивного ФР
+- `logs_dir`: директория с логами (можно использовать абсолютный путь к любой папке с логами)
+- `logs_mask_name`: маска имени лог-файла
+- `serialNumber_key`: ключ серийного номера ФР в логе
+- `fnNumber_key`: ключ номера ФН в логе
+
+Параметры плагина **`shtrihscanner`**:
+- `enabled`: запуск исполняемого файла плагина при работе службы
+- `exe_name`: имя\путь до запускаемого файла
+
+Параметры уведомлений:
+- `enabled`: включение уведомлений
+- `encryption`: шифрование данных для подключения боту
+- `bot_token`: токен Telegram бота
+- `chat_id`: ID чата
+- `max_attempts`: максимум попыток передачи
+- `delay`: задержка между попытками
+
+<br>Если будете пытаться использовать проверку логов с ПО, отличным от iiko, то имейте в виду что `serialNumber_key` и `fnNumber_key` должны содержать все символы, расположенные непосредственно перед номером в логе, включая кавычки `'` или символы открытия тега `<`.
+</details>
+
 ### connect.json
 <details>
 <summary>Настройки подключения к ККТ</summary>
@@ -234,108 +382,21 @@ pause
 Если при первом поиске ККТ Mitsu найдены не были, то **`type_connect`** принимает значение **`3`** и повторный поиск так же производиться не будет.
 </details>
 
-### service.json
-<details>
-<summary>Настройки службы</summary>
+### Аргументы запуска и шифрование учётных данных в конфиге
 
-```json
-{
-    "service": {
-        "updater_name": "updater.exe",
-        "reboot_file": "reboot.bat",
-        "log_level": "info",
-        "log_days": 7
-    },
-    "sending_data": {
-        "enabled": true,
-        "url_list": [
-            {
-                "encryption": false,
-                "url": "https://server.com/api/submit_json",
-                "api_key": ""
-            }
-        ],
-        "max_attempts": 5,
-        "delay": 2
-    },
-    "validation_fn": {
-        "enabled": true,
-        "forced": false,
-        "interval": 12,
-        "trigger_days": 3,
-        "target_time": "05:30",
-        "delete_days": 21,
-        "atol": {
-            "logs_dir": "iiko",
-            "logs_mask_name": "AtolFiscalRegister",
-            "serialNumber_key": "serialNumber=",
-            "fnNumber_key": "fnNumber="
-        },
-        "mitsu": {
-            "logs_dir": "iiko",
-            "logs_mask_name": "MitsuCRPlugin",
-            "serialNumber_key": "SERIAL='",
-            "fnNumber_key": "FN='"
-        }
-    },
-    "shtrihscanner": {
-        "enabled": true,
-        "exe_name": "shtrihscanner.exe"
-    },
-    "notification": {
-        "enabled": false,
-        "authentication": {
-            "encryption": false,
-            "bot_token": "",
-            "chat_id": ""
-        },
-        "max_attempts": 5,
-        "delay": 10
-    }
-}
-```
+Чтобы включить шифрование учётных данных в конфиге и сохранить в него данные для подключения в зашифрованном виде, используются аргументы запуска:
 
-Параметры службы:
-- `updater_name`: имя исполняемого файла утилиты обновления, расположенного в `updater` (любой .exe или .bat файл)
-- `reboot_file`: имя файла скрипта, расположенного в `_resources`, который будет выполнен в указанное время при обнаружении замены ФН (любой .exe или .bat файл)
-- `log_level`: уровень логирования
-- `log_days`: срок хранения логов (дни)
+- `--noip-url`: url-адрес NoIP-сервера
+- `--noip-key`: API-ключ для доступа к NoIP-серверу
+- `--bot-token`: токен Telegram бота
+- `--chat-id`: ID чата
 
-Параметры передачи данных:
-- `enabled`: включение передачи данных API-запросом
-- `url_list`: список серверов для передачи, позволяет добавлять неограниченное количество серверов
-- `encryption`: включение шифрования данных для подключения к серверу (для каждого сервера в списке включается отдельно)
-- `url`: адрес сервера вместе с ручкой
-- `api_key`: API-ключ, передаваемый в заголовке запроса
-- `max_attempts`: максимум попыток передачи
-- `delay`: задержка между попытками
+(Эти аргументы работают как совместно, так и по отдельности)
 
-Параметры проверки ФН:
-- `enabled`: включение проверки ФН
-- `forced`: позволяет пропустить сопоставление ФР к ФН по логам и сразу инициировать запуск `reboot_file` по настроенному ниже расписанию
-- `interval`: интервал проверки (часы)
-- `trigger_days`: дней до повторного сопоставления ФР к ФН по логам или принудительного запуска `reboot_file` при включенном `forced`
-- `target_time`: время выполнения скрипта `reboot_file`, при `false` выполнение скрипта инициируется сразу
-- `delete_days`: дней до удаления неактивного ФР
-- `logs_dir`: директория с логами (можно использовать абсолютный путь к любой папке с логами)
-- `logs_mask_name`: маска имени лог-файла
-- `serialNumber_key`: ключ серийного номера ФР в логе
-- `fnNumber_key`: ключ номера ФН в логе
+Для добавление нового сервера в список серверов на отправку данных, аргументы можно использовать только вместе друг с другом
 
-Параметры плагина **`shtrihscanner`**:
-- `enabled`: запуск исполняемого файла плагина при работе службы
-- `exe_name`: имя\путь до запускаемого файла
-
-Параметры уведомлений:
-- `enabled`: включение уведомлений
-- `encryption`: шифрование данных для подключения боту
-- `bot_token`: токен Telegram бота
-- `chat_id`: ID чата
-- `max_attempts`: максимум попыток передачи
-- `delay`: задержка между попытками
-
-<br>Если будете пытаться использовать проверку логов с ПО, отличным от iiko, то имейте в виду что `serialNumber_key` и `fnNumber_key` должны содержать все символы, расположенные непосредственно перед номером в логе, включая кавычки `'` или символы открытия тега `<`.
-</details>
+- `--db-url`: адрес сервера вместе с ручкой
+- `--db-apikey`: API-ключ, передаваемый в заголовке запроса
 
 ## Отпавка данных API-запросом
 Служба, в конце каждого цикла проверки ФН, делает `POST`-запрос на поочередную отправку всех `.json`-файлов, расположенных в папке `date`. `Json` передаются в теле запроса в сыром виде. Ручка запроса задаётся в файле конфигурации вместе с `url`-адресом и `API`-ключом.
@@ -408,12 +469,7 @@ version = "2.1.5.5"
 current_path = os.path.dirname(sys.executable)
 ```
 
-### 2. При сборке при помощи **`PyInstaller`**, необходимо явно указать некоторые импорты. Команда будет выглядеть так:
-```bash
-py -3.8 -m PyInstaller --hidden-import win32timezone --hidden-import win32serviceutil --hidden-import cryptography.fernet --hidden-import serial.tools.list_ports --hidden-import win32security --hidden-import win32ts --hidden-import win32service --hidden-import win32event --hidden-import servicemanager --hidden-import socket --hidden-import pywintypes --hidden-import win32api --onefile --noconsole --icon=favicon.ico posrelaydsc.py
-```
-
-## Использование шифрования учётных данных
+### 2. Замена ключа шифрования учётных данных
 
 Переменная **`crypto_key`** в конструкторе класса **`ResourceManagement`** в файле **`sys_manager.py`** содержит ключ, которым шифруются учётные данные для подключения к API-сервера и telegram-боту
 
@@ -427,31 +483,12 @@ class ResourceManagement:
 </details>
 <br>
 
-В каталоге `_tools` лежит скрипт `pr-tools.py` и конфиг `pr-tools.json`, в конфиг нужно вставить свои учётные данные, ключ и выполнить скрипт. На выходе получите текстовый документ с зашифрованными данными, которые нужно будет вставить в конфиг `service.json`
-<br>
-
-Дополнительные `decrypt_data` поля нужны на случай, если необходимо что-то расшифровать тем же ключом.
-
-<details>
-<summary><b>pr-tools.json</b></summary>
-  
-```json
-{
-	"crypto_key": "t_qxC_HN04Tiy1ish2P27ROYSJt_m7_FE2JT6gYngOM=",
-	"url": "",
-	"api_key": "",
-	"bot_token": "",
-	"chat_id": "",
-	"decrypt_data_1": "",
-	"decrypt_data_2": "",
-	"decrypt_data_3": "",
-	"decrypt_data_4": ""
-}
-```
-</details>
-<br>
-
 Там же лежит **`gen-key.py`**, запустив который, можно сгенерировать свой уникальный ключ.
+
+### 3. При сборке при помощи **`PyInstaller`**, необходимо явно указать некоторые импорты. Команда будет выглядеть так:
+```bash
+py -3.8 -m PyInstaller --hidden-import win32timezone --hidden-import win32serviceutil --hidden-import cryptography.fernet --hidden-import serial.tools.list_ports --hidden-import win32security --hidden-import win32ts --hidden-import win32service --hidden-import win32event  --hidden-import=win32pipe --hidden-import=win32file --hidden-import=win32job --hidden-import=win32security --hidden-import servicemanager --hidden-import socket --hidden-import pywintypes --hidden-import win32api --hidden-import websocket-client --onefile --noconsole --icon=favicon.ico posrelaydsc.py
+```
 
 ## Отправка уведомлений в Telegram
 

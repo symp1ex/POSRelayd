@@ -72,7 +72,7 @@ service_data = {
         "interval": 8,
         "trigger_days": 2,
         "target_time": "05:30",
-        "delete_days": 14,
+        "delete_days": 25,
         "atol": {
             "logs_dir": "iiko",
             "logs_mask_name": "AtolFiscalRegister",

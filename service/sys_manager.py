@@ -283,6 +283,14 @@ class ResourceManagement:
         except Exception:
             service.logger.logger_service.error(f"Error: Не удалось удалить старые данные", exc_info=True)
 
+    def clean_uuid(self):
+        try:
+            if os.path.exists(ResourceManagement.uuid_file):
+                os.remove(ResourceManagement.uuid_file)
+                service.logger.logger_service.debug(f"Произведена очистка: '{ResourceManagement.uuid_file}'")
+        except Exception:
+            service.logger.logger_service.warning("Не удалось произвести очистку uuid")
+
     def current_time(self):
         try:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

@@ -255,9 +255,9 @@ class AnyRemoteId:
             config_ra_path = os.path.join(about.current_path, "_resources")
             config_ra = service.configs.read_config_file(config_ra_path, "remote-access.json",
                                                          service.configs.ra_config, create=True)
-            self_id = config_ra.get("id", "None")
+            self_id = config_ra.get("id", "-")
 
             return self_id
         except Exception:
             service.logger.logger_service.error(f"Не удалось прочитать id из 'remote-access.json'", exc_info=True)
-            return "None"
+            return "-"
