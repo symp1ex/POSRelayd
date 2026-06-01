@@ -290,6 +290,107 @@ class ResourceManagement:
         except Exception:
             service.logger.logger_service.error(f"Не удалось получить текущее время", exc_info=True)
 
+    def save_noip_config(self, noip_url=None, noip_key=None):
+        try:
+            service.logger.logger_service.debug("Запущен режим настройки NoIP-сервера")
+
+            if noip_url:
+                self.config["service"]["noip_connection"]["url"] = \
+                    self.encrypt_data(noip_url).decode()
+
+            if noip_key:
+                self.config["service"]["noip_connection"]["api_key"] = \
+                    self.encrypt_data(noip_key).decode()
+
+            if noip_url or noip_key:
+                self.config["service"]["noip_connection"]["encryption"] = True
+
+            service.configs.write_json_file(
+                self.config,
+                self.config_file
+            )
+
+            service.logger.logger_service.info("NoIP-конфигурация успешно сохранена")
+
+        except Exception:
+            service.logger.logger_service.updater.error(
+                "Не удалось сохранить NoIP-конфигурацию",
+                exc_info=True
+            )
+            os._exit(1)
+
+    def save_telegram_config(self, bot_token=None, chat_id=None):
+        try:
+            service.logger.logger_service.debug("Запущен режим настройки Telegram бота")
+
+            if bot_token:
+                self.config["notification"]["authentication"]["bot_token"] = \
+                    self.encrypt_data(bot_token).decode()
+
+            if chat_id:
+                self.config["notification"]["authentication"]["chat_id"] = \
+                    self.encrypt_data(chat_id).decode()
+
+            if bot_token or chat_id:
+                self.config["notification"]["authentication"]["encryption"] = True
+
+            service.configs.write_json_file(
+                self.config,
+                self.config_file
+            )
+
+            service.logger.logger_service.info("Конфигурация Telegram бота успешно сохранена")
+
+        except Exception:
+            service.logger.logger_service.error(
+                "Не удалось сохранить конфигурацию Telegram бота",
+                exc_info=True
+            )
+            os._exit(1)
+
+    def add_sending_data_endpoint(self, db_url=None, db_apikey=None):
+        try:
+            service.logger.logger_service.debug(
+                "Запущен режим добавления endpoint для отправки данных"
+            )
+
+            if not db_url or not db_apikey:
+                raise ValueError(
+                    f"Usage only:\n"
+                    f"posrelaydsc.exe --db-url <db url> --db-apikey <db apikey>"
+                )
+
+            entry = {
+                "encryption": False,
+                "url": db_url,
+                "api_key": db_apikey
+            }
+
+            if db_apikey:
+                entry["api_key"] = self.encrypt_data(db_apikey).decode()
+                entry["encryption"] = True
+
+            entry["url"] = self.encrypt_data(db_url).decode()
+            entry["encryption"] = True
+
+            self.config["sending_data"]["url_list"].append(entry)
+
+            service.configs.write_json_file(
+                self.config,
+                self.config_file
+            )
+
+            service.logger.logger_service.info(
+                "Endpoint успешно добавлен в sending_data.url_list"
+            )
+
+        except Exception:
+            service.logger.logger_service.error(
+                "Не удалось добавить endpoint в sending_data.url_list",
+                exc_info=True
+            )
+            os._exit(1)
+
 class ProcessManagement(ResourceManagement):
     def __init__(self):
         super().__init__()

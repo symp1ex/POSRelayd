@@ -64,6 +64,96 @@ def run_without_arguments():
         service.logger.logger_service.error(
             "Запуск исполняемого файла без аргументов завершился c ошибкой", exc_info=True)
 
+def checking_launch_arguments():
+    if "--pass" in sys.argv:
+        try:
+            idx = sys.argv.index("--pass")
+            password = sys.argv[idx + 1]
+        except (IndexError, ValueError):
+            service.logger.logger_service.warning("Usage: posrelaydsc.exe --pass <password>")
+            sys.exit(1)
+
+        from ra.setpass import send_password_once
+        send_password_once(password)
+        sys.exit(0)
+
+    noip_url = None
+    noip_key = None
+
+    try:
+        if "--noip-url" in sys.argv:
+            idx = sys.argv.index("--noip-url")
+            noip_url = sys.argv[idx + 1]
+
+        if "--noip-key" in sys.argv:
+            idx = sys.argv.index("--noip-key")
+            noip_key = sys.argv[idx + 1]
+
+        if noip_url or noip_key:
+            validation_fn.save_noip_config(
+                noip_url=noip_url,
+                noip_key=noip_key
+            )
+            os._exit(0)
+    except (IndexError, ValueError):
+        service.logger.logger_service.warning.updater.critical(
+            f"Usage:\n"
+            f"posrelaydsc.exe --noip-url <url> OR\n"
+            f"posrelaydsc.exe --noip-key <apikey> OR\n"
+        )
+        sys.exit(1)
+
+    bot_token = None
+    chat_id = None
+
+    try:
+        if "--bot-token" in sys.argv:
+            idx = sys.argv.index("--bot-token")
+            bot_token = sys.argv[idx + 1]
+
+        if "--chat-id" in sys.argv:
+            idx = sys.argv.index("--chat-id")
+            chat_id = sys.argv[idx + 1]
+
+        if bot_token or chat_id:
+            validation_fn.save_telegram_config(
+                bot_token=bot_token,
+                chat_id=chat_id
+            )
+            os._exit(0)
+    except (IndexError, ValueError):
+        service.logger.logger_service.warning.updater.critical(
+            f"Usage:\n"
+            f"posrelaydsc.exe --bot-token <bot token> OR\n"
+            f"posrelaydsc.exe --chat-id <chat id> OR\n"
+        )
+        sys.exit(1)
+
+    db_url = None
+    db_apikey = None
+
+    try:
+        if "--db-url" in sys.argv:
+            idx = sys.argv.index("--db-url")
+            db_url = sys.argv[idx + 1]
+
+        if "--db-apikey" in sys.argv:
+            idx = sys.argv.index("--db-apikey")
+            db_apikey = sys.argv[idx + 1]
+
+        if db_url or db_apikey:
+            validation_fn.add_sending_data_endpoint(
+                db_url=db_url,
+                db_apikey=db_apikey
+            )
+            os._exit(0)
+    except (IndexError, ValueError):
+        service.logger.logger_service.warning.updater.critical(
+            f"Usage only:\n"
+            f"posrelaydsc.exe --db-url <db url> --db-apikey <db apikey>"
+        )
+        sys.exit(1)
+
 def get_fiscals_data():
     getdata.atol.atol.get_atol_data()
     mitsu.get_data()
@@ -156,17 +246,7 @@ class Service(win32serviceutil.ServiceFramework):
 if __name__ == '__main__':
     multiprocessing.freeze_support()
 
-    if "-pass" in sys.argv:
-        try:
-            idx = sys.argv.index("-pass")
-            password = sys.argv[idx + 1]
-        except (IndexError, ValueError):
-            service.logger.logger_service.warning("Usage: posrelaydsc.exe -pass <password>")
-            sys.exit(1)
-
-        from ra.setpass import send_password_once
-        send_password_once(password)
-        sys.exit(0)
+    checking_launch_arguments()
 
     if len(sys.argv) == 1:
         try:
