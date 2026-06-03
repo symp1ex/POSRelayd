@@ -13,14 +13,14 @@ https://github.com/symp1ex/posrelayd-noip
 **Клиентское приложение:**
 https://github.com/symp1ex/POSRelayv
 
-Для включения функции необходимо поменять значение `enabled` на `true` в конфиге по пути `.\_resources\remote-access.json` (конфиг создаётся при первом запуске). В нём же хранятся `ID` для подключения и временный пароль.
+Для отключения функции необходимо добавить значение `enabled` = `false` в конфиге по пути `.\_resources\remote-access.json` (конфиг создаётся при первом запуске). В нём же хранятся `ID` для подключения и временный пароль.
 
 <details>
 <summary>Пример <b>remote-access.json</b></summary>
 
 ```json
 {
-    "enabled": true,
+    "enabled": false,
     "id": "-",
     "temp_pass": "-"
 }
@@ -471,13 +471,13 @@ current_path = os.path.dirname(sys.executable)
 
 ### 2. Замена ключа шифрования учётных данных
 
-Переменная **`crypto_key`** в конструкторе класса **`ResourceManagement`** в файле **`sys_manager.py`** содержит ключ, которым шифруются учётные данные для подключения к API-сервера и telegram-боту
+Переменная **`crypto_key`** в конструкторе класса **`Crypto`** в файле **`sys_manager.py`** содержит ключ, которым шифруются учётные данные для подключения к API-сервера и telegram-боту
 
 <details>
 <summary><b>sys_manager.py</b></summary>
   
 ```python
-class ResourceManagement:
+class Crypto:
     crypto_key = b't_qxC_HN04Tiy1ish2P27ROYSJt_m7_FE2JT6gYngOM='
 ```
 </details>

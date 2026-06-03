@@ -18,11 +18,15 @@ class CMDClient(service.sys_manager.ResourceManagement):
         super().__init__()
 
         self.config_ra_path = os.path.join(about.current_path, self.resource_path, self.config_ra_name)
+
         self.config_ra = service.configs.read_config_file(
             about.current_path, self.config_ra_path, service.configs.ra_config, create=True)
+        if not self.config_ra:
+            self.config_ra = service.configs.read_config_file(
+                about.current_path, self.config_ra_path, service.configs.ra_config)
 
-        try: self.ra_enabled = int(self.config_ra.get("enabled", False))
-        except: self.ra_enabled = 0
+        try: self.ra_enabled = int(self.config_ra.get("enabled", True))
+        except: self.ra_enabled = 1
 
         self.encryption_enabled = self.config.get("service", {}).get("noip_connection", {}).get("encryption", False)
         self.server_ws = str(self.config.get("service", {}).get("noip_connection", {}).get("url", ""))

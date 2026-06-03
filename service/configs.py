@@ -103,7 +103,6 @@ service_data = {
 }
 
 ra_config = {
-    "enabled": False,
     "id": "-",
     "temp_pass": "-"
 }

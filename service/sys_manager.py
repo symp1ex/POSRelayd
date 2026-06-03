@@ -12,11 +12,57 @@ from datetime import datetime
 import win32api
 import shutil
 from cryptography.fernet import Fernet
+import base64
+import win32crypt
 
 rm_date_flag = 0
+CRYPTPROTECT_LOCAL_MACHINE = 0x4
 
-class ResourceManagement:
+class Crypto:
     crypto_key = b't_qxC_HN04Tiy1ish2P27ROYSJt_m7_FE2JT6gYngOM='
+
+    def decrypt_data(self, encrypted_data):
+        try:
+            cipher = Fernet(self.crypto_key)
+            decrypted_data = cipher.decrypt(encrypted_data).decode()
+            return decrypted_data
+        except Exception:
+            service.logger.logger_service.error("Не удалось дешифровать данные", exc_info=True)
+
+    def encrypt_data(self, data):
+        try:
+            cipher = Fernet(self.crypto_key)
+            encrypted_data = cipher.encrypt(data.encode())
+            return encrypted_data
+        except Exception:
+            service.logger.logger_service.error("Не удалось зашифровать данные", exc_info=True)
+
+    def encrypt_uuid_dpapi_machine(self, uuid_value: str) -> str:
+        encrypted_bytes = win32crypt.CryptProtectData(
+            uuid_value.encode("utf-8"),
+            "App UUID",
+            None,
+            None,
+            None,
+            CRYPTPROTECT_LOCAL_MACHINE
+        )
+
+        return base64.b64encode(encrypted_bytes).decode("ascii")
+
+    def decrypt_uuid_dpapi_machine(self, encrypted_uuid: str) -> str:
+        encrypted_bytes = base64.b64decode(encrypted_uuid)
+
+        _, decrypted_bytes = win32crypt.CryptUnprotectData(
+            encrypted_bytes,
+            None,
+            None,
+            None,
+            CRYPTPROTECT_LOCAL_MACHINE
+        )
+
+        return decrypted_bytes.decode("utf-8")
+
+class ResourceManagement(Crypto):
     config_file = "service.json"
     resource_path = "_resources"
     date_path = os.path.join(about.current_path, "date")
@@ -25,6 +71,8 @@ class ResourceManagement:
     uuid = None
 
     def __init__(self):
+        super().__init__()
+
         self.config = service.configs.read_config_file(about.current_path, self.config_file,
                                                        service.configs.service_data, create=True)
 
@@ -50,22 +98,6 @@ class ResourceManagement:
     def get_fiscals_json(self):
         self.fiscals_data = service.configs.read_config_file(about.current_path, self.fiscals_file,
                                                              {"atol":[],"mitsu":[],"shtrih":[]}, create=True)
-
-    def decrypt_data(self, encrypted_data):
-        try:
-            cipher = Fernet(self.crypto_key)
-            decrypted_data = cipher.decrypt(encrypted_data).decode()
-            return decrypted_data
-        except Exception:
-            service.logger.logger_service.error("Не удалось дешифровать данные", exc_info=True)
-
-    def encrypt_data(self, data):
-        try:
-            cipher = Fernet(self.crypto_key)
-            encrypted_data = cipher.encrypt(data.encode())
-            return encrypted_data
-        except Exception:
-            service.logger.logger_service.error("Не удалось зашифровать данные", exc_info=True)
 
     def update_correlation_fiscals(self, serialNumber, fn_serial, get_current_time, model_kkt):
         self.get_fiscals_json()
@@ -150,9 +182,9 @@ class ResourceManagement:
 
         try:
             if os.path.exists(self.uuid_file):
-                with open(self.uuid_file, 'rb') as f:
-                    encrypted_uuid = f.read()
-                    stored_uuid = self.decrypt_data(encrypted_uuid)
+                with open(self.uuid_file, 'r', encoding='ascii') as f:
+                    encrypted_uuid = f.read().strip()
+                    stored_uuid = self.decrypt_uuid_dpapi_machine(encrypted_uuid)
                     # Проверяем, соответствует ли прочитанное значение формату UUID
                     try:
                         uuid.UUID(stored_uuid)
@@ -195,11 +227,11 @@ class ResourceManagement:
             stable_uuid = uuid.UUID(bytes=hash_bytes[:16])
             service.logger.logger_service.debug(f"Сформирован uuid: '{stable_uuid}'")
 
-            encrypted_uuid = self.encrypt_data(str(stable_uuid))
+            encrypted_uuid = self.encrypt_uuid_dpapi_machine(str(stable_uuid))
 
             try:
                 with open(self.uuid_file, 'w') as f:
-                    f.write(str(encrypted_uuid.decode('utf-8')))
+                    f.write(str(encrypted_uuid))
                 service.logger.logger_service.debug(
                     f"UUID '{stable_uuid}' записан в файл: '{os.path.abspath(self.uuid_file)}'")
             except Exception:
@@ -282,14 +314,6 @@ class ResourceManagement:
                 service.logger.logger_service.info(f"Старые данные успешно удалены")
         except Exception:
             service.logger.logger_service.error(f"Error: Не удалось удалить старые данные", exc_info=True)
-
-    def clean_uuid(self):
-        try:
-            if os.path.exists(ResourceManagement.uuid_file):
-                os.remove(ResourceManagement.uuid_file)
-                service.logger.logger_service.debug(f"Произведена очистка: '{ResourceManagement.uuid_file}'")
-        except Exception:
-            service.logger.logger_service.warning("Не удалось произвести очистку uuid")
 
     def current_time(self):
         try:
