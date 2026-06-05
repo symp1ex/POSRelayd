@@ -474,7 +474,7 @@ current_path = os.path.dirname(sys.executable)
 Переменная **`crypto_key`** в конструкторе класса **`Crypto()`** в файле **`crypto.py`** содержит ключ, которым шифруются учётные данные для подключения к API-сервера и telegram-боту
 
 <details>
-<summary><b>sys_manager.py</b></summary>
+<summary><b>crypto.py</b></summary>
   
 ```python
 class Crypto:

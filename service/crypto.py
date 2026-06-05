@@ -3,10 +3,9 @@ import service.configs
 from cryptography.fernet import Fernet
 import base64
 import win32crypt
-from typing import Literal, Optional, Tuple, Union
+from typing import Literal, Optional, Union
 import os
 from pathlib import Path
-from typing import Literal, Tuple
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, ec, rsa, padding
 
