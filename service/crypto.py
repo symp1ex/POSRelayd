@@ -102,6 +102,7 @@ class ClientIdentityManager:
             raise ValueError(f"Unsupported algorithm: {algorithm}")
         except Exception:
             service.logger.logger_service.error("Не удалось сгенерировать приватный ключ", exc_info=True)
+
     def save_private_key_dpapi(
             self,
             *,
@@ -124,7 +125,6 @@ class ClientIdentityManager:
             self.PRIVATE_KEY_PATH.write_bytes(encrypted_private_key)
         except Exception:
             service.logger.logger_service.error("Не удалось сохранить приватный ключ", exc_info=True)
-
 
     def load_private_key_from_dpapi(
             self,
