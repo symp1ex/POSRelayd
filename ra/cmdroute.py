@@ -2,6 +2,7 @@ import about
 import service.logger
 import service.sys_manager
 import service.configs
+import service.crypto
 from ra.cmdrun import CmdContextManager, is_process_alive
 import os
 import threading
@@ -9,7 +10,9 @@ import json
 import time
 import win32event
 from websocket import WebSocketApp
+import base64
 
+client_identity = service.crypto.ClientIdentityManager()
 
 class CMDClient(service.sys_manager.ResourceManagement):
     config_ra_name = "remote-access.json"
@@ -60,6 +63,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 "Подключение отклонено сервером: IP заблокирован"
             )
             self.ra_enabled = False
+            service.logger.logger_service.warning(f"Попытки подключения к NoIP-серверу будут прекращены")
             return
 
         service.logger.logger_service.error(
@@ -93,12 +97,15 @@ class CMDClient(service.sys_manager.ResourceManagement):
                                                 exc_info=True)
 
     def on_open(self, ws):
+        client_identity.init_keypair(algorithm="ed25519")
+
         service.logger.logger_service.info("Соединение с NoIP-сервером установлено, WebSocket открыт")
         try:
             ws.send(json.dumps({
                 "type": "client_hello",
                 "id": self.client_id,
-                "api_key": self.api_key
+                "api_key": self.api_key,
+                "public_key": client_identity.public_key
             }))
         except Exception:
             service.logger.logger_service.error("Ошибка при отправке 'client_hello'", exc_info=True)
@@ -113,11 +120,60 @@ class CMDClient(service.sys_manager.ResourceManagement):
             service.logger.logger_service.error("Возникло неожиданное исключение при попытке закрыть WebSocket",
                                                 exc_info=True)
 
+    def handshake(self, ws, msg):
+        if msg.get("answer") == "register":
+            service.configs.create_json_file(
+                client_identity.metadata_path, client_identity.metadata_file, {"uuid": self.client_id, "register": 1})
+            service.logger.logger_service.info("Запрос на регистрацию успешно подтверждён со стороны сервера")
+            return
+
+        if msg.get("answer") == "fail":
+            service.logger.logger_service.warning(f"NoIP-сервер отклонил рукопожатие: '{msg.get('description')}'")
+            service.logger.logger_service.warning(f"Попытки подключения к NoIP-серверу будут прекращены")
+            self.ra_enabled = False
+            return
+
+        if msg.get("answer") == "check":
+            service.logger.logger_service.debug("NoIP-сервер запросил проверку подписи")
+            challenge = msg.get("challenge")
+
+            if not challenge:
+                service.logger.logger_service.warning("Не был получен 'challenge' на проверку от NoIP-сервера")
+                return
+
+            challenge_bytes = bytes.fromhex(challenge)
+            signature = client_identity.sign_challenge(challenge=challenge_bytes)
+
+            if not signature:
+                service.logger.logger_service.warning("Не удалось сформировать подпись для 'challenge'")
+                return
+
+            signature_b64 = base64.b64encode(signature).decode("ascii")
+
+            try:
+                ws.send(json.dumps({
+                    "type": "sign",
+                    "id": self.client_id,
+                    "signature": signature_b64
+                }))
+            except Exception:
+                service.logger.logger_service.error("Ошибка при отправке 'client_hello'", exc_info=True)
+            return
+
+        elif msg.get("answer") == "ok":
+            service.logger.logger_service.debug("Сервер подтвердил рукопожатие")
+            return
+
     def on_message(self, ws, message):
         try:
             msg = json.loads(message)
+
+            if msg.get("type") == "handshake":
+                self.handshake(ws, msg)
+                return
+
             if msg.get("type") == "error":
-                service.logger.logger_service.error(f"Ошибка от сервера: {msg.get('error')}")
+                service.logger.logger_service.error(f"Сервер сообщил об ошибке: '{msg.get('error')}'")
                 return
 
             if msg["type"] == "temp_pass":
@@ -149,6 +205,10 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 if msg.get("command") == "CTRL_C":
                     service.logger.logger_service.debug("Получена команда 'Ctrl+C'")
                     self.send_ctrl_c(msg["id"])
+            else:
+                service.logger.logger_service.warning(
+                    f"Получено неизвестное сообщение от сервера: '{msg}'")
+                return
         except Exception as e:
             service.logger.logger_service.error(f"Ошибка при обработке сообщения WS: {e}", exc_info=True)
 
@@ -318,9 +378,9 @@ class CMDClient(service.sys_manager.ResourceManagement):
             except Exception as e:
                 service.logger.logger_service.error(f"WebSocket loop crash: {e}")
 
-            # Если вышли из run_forever — пишем в лог
-            service.logger.logger_service.warning(
-                "Соединение с NoIP-сервером разорвано, повторная попытка через 15 секунд...")
+            if self.ra_enabled:
+                service.logger.logger_service.warning(
+                    "Соединение с NoIP-сервером разорвано, повторная попытка через 15 секунд...")
 
             # Ожидание перед реконнектом
             rc = win32event.WaitForSingleObject(service_instance.hWaitStop, 15000)

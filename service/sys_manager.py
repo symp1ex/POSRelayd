@@ -1,5 +1,6 @@
 import service.logger
 import service.configs
+import service.crypto
 import about
 import os
 import subprocess
@@ -11,58 +12,12 @@ import hashlib
 from datetime import datetime
 import win32api
 import shutil
-from cryptography.fernet import Fernet
-import base64
-import win32crypt
+
 
 rm_date_flag = 0
-CRYPTPROTECT_LOCAL_MACHINE = 0x4
 
-class Crypto:
-    crypto_key = b't_qxC_HN04Tiy1ish2P27ROYSJt_m7_FE2JT6gYngOM='
 
-    def decrypt_data(self, encrypted_data):
-        try:
-            cipher = Fernet(self.crypto_key)
-            decrypted_data = cipher.decrypt(encrypted_data).decode()
-            return decrypted_data
-        except Exception:
-            service.logger.logger_service.error("Не удалось дешифровать данные", exc_info=True)
-
-    def encrypt_data(self, data):
-        try:
-            cipher = Fernet(self.crypto_key)
-            encrypted_data = cipher.encrypt(data.encode())
-            return encrypted_data
-        except Exception:
-            service.logger.logger_service.error("Не удалось зашифровать данные", exc_info=True)
-
-    def encrypt_uuid_dpapi_machine(self, uuid_value: str) -> str:
-        encrypted_bytes = win32crypt.CryptProtectData(
-            uuid_value.encode("utf-8"),
-            "App UUID",
-            None,
-            None,
-            None,
-            CRYPTPROTECT_LOCAL_MACHINE
-        )
-
-        return base64.b64encode(encrypted_bytes).decode("ascii")
-
-    def decrypt_uuid_dpapi_machine(self, encrypted_uuid: str) -> str:
-        encrypted_bytes = base64.b64decode(encrypted_uuid)
-
-        _, decrypted_bytes = win32crypt.CryptUnprotectData(
-            encrypted_bytes,
-            None,
-            None,
-            None,
-            CRYPTPROTECT_LOCAL_MACHINE
-        )
-
-        return decrypted_bytes.decode("utf-8")
-
-class ResourceManagement(Crypto):
+class ResourceManagement(service.crypto.Crypto):
     config_file = "service.json"
     resource_path = "_resources"
     date_path = os.path.join(about.current_path, "date")

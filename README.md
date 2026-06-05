@@ -471,7 +471,7 @@ current_path = os.path.dirname(sys.executable)
 
 ### 2. Замена ключа шифрования учётных данных
 
-Переменная **`crypto_key`** в конструкторе класса **`Crypto`** в файле **`sys_manager.py`** содержит ключ, которым шифруются учётные данные для подключения к API-сервера и telegram-боту
+Переменная **`crypto_key`** в конструкторе класса **`Crypto()`** в файле **`crypto.py`** содержит ключ, которым шифруются учётные данные для подключения к API-сервера и telegram-боту
 
 <details>
 <summary><b>sys_manager.py</b></summary>
