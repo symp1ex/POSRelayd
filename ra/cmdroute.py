@@ -175,6 +175,10 @@ class CMDClient(service.sys_manager.ResourceManagement):
 
             if msg.get("type") == "error":
                 service.logger.logger_service.error(f"Сервер сообщил об ошибке: '{msg.get('error')}'")
+                exit_code = msg.get('exit_code')
+                if exit_code == 1:
+                    service.logger.logger_service.warning(f"Попытки подключения к NoIP-серверу будут прекращены")
+                    self.ra_enabled = False
                 return
 
             if msg["type"] == "temp_pass":
