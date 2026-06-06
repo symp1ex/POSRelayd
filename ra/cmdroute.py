@@ -3,7 +3,7 @@ import service.logger
 import service.sys_manager
 import service.configs
 import service.crypto
-from ra.cmdrun import CmdContextManager, is_process_alive
+from ra.cmdrun import CmdContextManager, is_process_alive, decode_cmd_bytes
 import os
 import threading
 import json
@@ -11,6 +11,7 @@ import time
 import win32event
 from websocket import WebSocketApp
 import base64
+
 
 client_identity = service.crypto.ClientIdentityManager()
 
@@ -267,6 +268,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
         if session:
             session.__exit__(None, None, None)
 
+
     def _send_cmd_output(self, admin_id, ws, command_id, session):
         last_pos = 0  # позиция в byte-буфере
         first_line_skipped = False  # первая строка отброшена или нет
@@ -289,7 +291,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 chunk = raw[last_pos:]
                 last_pos = len(raw)
 
-                text = chunk.decode("cp866", errors="replace")
+                text = decode_cmd_bytes(chunk)
 
                 # пропуск первой строки
                 if not first_line_skipped:

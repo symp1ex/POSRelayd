@@ -9,6 +9,9 @@ import win32pipe
 import win32file
 import subprocess
 import threading
+import codecs
+
+OEM_ENCODING = "oem"
 
 class CmdContextManager:
     def __init__(self):
@@ -93,7 +96,7 @@ class CmdContextManager:
                 self.buffer += data
 
                 if not self.initial_output_captured:
-                    decoded = self.buffer.decode("cp866", errors="replace")
+                    decoded = self.buffer.decode(OEM_ENCODING, errors="replace")
 
                     # cmd готов — появился prompt
                     if decoded.rstrip().endswith(">"):
@@ -106,15 +109,15 @@ class CmdContextManager:
         if self.user_session == True:
             win32file.WriteFile(
                 self.proc["stdin"],
-                text.encode("cp866")
+                text.encode(OEM_ENCODING)
             )
         else:
             if self.proc and self.proc.stdin:
-                self.proc.stdin.write(text.encode("cp866"))
+                self.proc.stdin.write(text.encode(OEM_ENCODING))
                 self.proc.stdin.flush()
 
     def read(self) -> str:
-        return self.buffer.decode("cp866", errors="replace")
+        return self.buffer.decode(OEM_ENCODING, errors="replace")
 
     def clear(self):
         self.buffer = b""
@@ -205,4 +208,16 @@ def get_elevated_token(user_token):
 def is_process_alive(hProcess):
     code = win32process.GetExitCodeProcess(hProcess)
     return code == win32con.STILL_ACTIVE
+
+def decode_cmd_bytes(data: bytes) -> str:
+    if not data:
+        return ""
+
+    if data.startswith(codecs.BOM_UTF8):
+        return data.decode("utf-8-sig", errors="replace")
+
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(OEM_ENCODING, errors="replace")
 
