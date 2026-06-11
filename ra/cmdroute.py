@@ -11,6 +11,7 @@ import time
 import win32event
 from websocket import WebSocketApp
 import base64
+import uuid
 
 
 client_identity = service.crypto.ClientIdentityManager()
@@ -42,6 +43,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
         else:
             self.get_connection_data()
 
+        self.instance_id = str(uuid.uuid4())
         self.sessions = {}  # admin_id -> CmdContextManager
         self.waiting_keypress = {}
 
@@ -106,7 +108,8 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 "type": "client_hello",
                 "id": self.client_id,
                 "api_key": self.api_key,
-                "public_key": client_identity.public_key
+                "public_key": client_identity.public_key,
+                "instance_id": self.instance_id
             }))
         except Exception:
             service.logger.logger_service.error("Ошибка при отправке 'client_hello'", exc_info=True)

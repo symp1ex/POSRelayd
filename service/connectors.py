@@ -62,7 +62,7 @@ class SendingData(service.sys_manager.ResourceManagement):
                             }
 
                             # Отправка запроса
-                            response = requests.post(url_value, headers=headers, json=json_data)
+                            response = requests.post(url_value, headers=headers, json=json_data, timeout=(15, 60))
 
                             # Проверка ответа
                             service.logger.logger_service.info(f"Статус ответа: {response.status_code}")
@@ -124,7 +124,7 @@ class TelegramNotification(service.sys_manager.ResourceManagement):
                     "text": full_message
                 }
 
-                response = requests.get(url, params=params)
+                response = requests.get(url, params=params, timeout=(15, 60))
                 result = response.json()
 
                 # Вывод полного ответа API
