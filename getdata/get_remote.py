@@ -13,8 +13,10 @@ class AnyRemoteId:
     server_url = None
     teamviewer_id = None
     rustdesk_id = None
-    anydesk_id = None
     litemanager_id = None
+
+    ad_file = os.path.join(about.current_path, "_resources", "ad")
+    anydesk_id = None
 
     def get_user_appdata(self, target_folder_path):
         service.logger.logger_service.debug(f"Пытаемся найти домашнюю директорию активного пользователя")
@@ -153,26 +155,52 @@ class AnyRemoteId:
         if AnyRemoteId.anydesk_id != None:
             return AnyRemoteId.anydesk_id
 
-        target_folder_path = "anydesk"
-
-        if AnyRemoteId.user_appdata == None:
-            self.get_user_appdata(target_folder_path)
-
-        conf_path = os.path.join(str(self.user_appdata), 'anydesk', 'system.conf')
         try:
-            with open(conf_path, 'r', encoding='utf-8') as file:
-                for line in file:
-                    if line.startswith("ad.anynet.id"):
-                        ad_anynet_id = line.split("=")[1].strip()
-                        AnyRemoteId.anydesk_id = ad_anynet_id
-                        return AnyRemoteId.anydesk_id
-            service.logger.logger_service.warn(f"Параметр 'ad.anynet.id' не найден в '{conf_path}'.")
-            return None
-        except FileNotFoundError:
-            service.logger.logger_service.warn(f"Файл '{conf_path}' не найден.")
+            if os.path.exists(self.ad_file):
+                with open(self.ad_file, 'r', encoding='ascii') as f:
+                    ad_id = f.read().strip()
+                    service.logger.logger_service.debug(
+                        f"Anydesk ID прочитан из файла '{os.path.abspath(self.ad_file)}': '{ad_id}'")
+                    AnyRemoteId.anydesk_id = ad_id
+                    return AnyRemoteId.anydesk_id
         except Exception:
-            service.logger.logger_service.error(f'Не удалось получить anydesk_id из {conf_path}',
+            service.logger.logger_service.error("Не удалось прочитать файл 'ad'", exc_info=True)
+
+        # Путь к исполняемому файлу
+        file_path = "C:\\Program Files (x86)\\AnyDesk\\anydesk.exe"
+        if not os.path.exists(file_path):
+            file_path = "C:\\Program Files\\AnyDesk\\anydesk.exe"
+
+        # Проверяем, существует ли файл по указанному пути
+        if not os.path.exists(file_path):
+            return None
+        try:
+            result = subprocess.run([file_path, "--get-id"], capture_output=True, text=True, check=True)
+
+            lines = result.stdout.strip().splitlines()
+
+            anydesk_id = lines[-1].strip()
+            AnyRemoteId.anydesk_id = anydesk_id
+
+            try:
+                with open(self.ad_file, 'w') as f:
+                    f.write(str(anydesk_id))
+                service.logger.logger_service.debug(
+                    f"Anydesk ID '{anydesk_id}' записан в файл: '{os.path.abspath(self.ad_file)}'")
+            except Exception:
+                service.logger.logger_service.error(
+                    f"Не удалось записать Anydesk ID '{os.path.abspath(self.ad_file)}'", exc_info=True)
+
+            return AnyRemoteId.anydesk_id
+        except subprocess.CalledProcessError:
+            service.logger.logger_service.error(f'Не удалось выполнить запрос на получение Anydesk ID',
                                                 exc_info=True)
+            return None
+        except Exception:
+            service.logger.logger_service.error(f'Не удалось получить Anydesk ID',
+                                                exc_info=True)
+            return None
+
 
     def get_teamviewer_id(self):
         if AnyRemoteId.teamviewer_id != None:

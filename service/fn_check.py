@@ -77,7 +77,7 @@ class ValidationFn(service.sys_manager.ProcessManagement):
                 elif model_kkt == "mitsu":
                     json_file["installed_driver"] = str(mitsu.get_driver_version())
 
-
+                json_file["anydesk_id"] = str(get_remote_id.get_anydesk_id())
                 json_file["rustdesk_id"] = str(get_remote_id.get_rustdesk_id())
                 json_file["pr_id"] = str(get_remote_id.get_self_id())
                 json_file["url_rms"] = get_remote_id.get_server_url()

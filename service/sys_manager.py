@@ -27,6 +27,7 @@ class ResourceManagement(service.crypto.Crypto):
 
     def __init__(self):
         super().__init__()
+        self.init_resources_folder()
 
         self.config = service.configs.read_config_file(about.current_path, self.config_file,
                                                        service.configs.service_data, create=True)
@@ -49,6 +50,12 @@ class ResourceManagement(service.crypto.Crypto):
         except: self.delete_days = 21
 
         self.fiscals_data = None
+
+    def init_resources_folder(self):
+        path = os.path.join(about.current_path, self.resource_path)
+        if not os.path.isdir(path):
+            os.makedirs(path, exist_ok=True)
+
 
     def get_fiscals_json(self):
         self.fiscals_data = service.configs.read_config_file(about.current_path, self.fiscals_file,
