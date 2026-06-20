@@ -44,7 +44,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
             self.get_connection_data()
 
         self.instance_id = str(uuid.uuid4())
-        self.sessions = {}  # admin_id -> CmdContextManager
+        self.sessions = {}  # session_id -> CmdContextManager
         self.waiting_keypress = {}
 
     def get_connection_data(self):
@@ -116,9 +116,9 @@ class CMDClient(service.sys_manager.ResourceManagement):
 
     def on_close(self, ws, *args):
         try:
-            for admin_id, session in list(self.sessions.items()):
+            for session_id, session in list(self.sessions.items()):
                 session.__exit__(None, None, None)
-                del self.sessions[admin_id]
+                del self.sessions[session_id]
                 service.logger.logger_service.debug("Соединение с NoIP-сервером разорвано, WebSocket закрыт")
         except Exception:
             service.logger.logger_service.error("Возникло неожиданное исключение при попытке закрыть WebSocket",
@@ -195,16 +195,16 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 return
 
             if msg["type"] == "admin_attach":
-                admin_id = msg["id"]
-                threading.Thread(target=self.admin_session, args=(admin_id,), daemon=True).start()
+                session_id = msg["id"]
+                threading.Thread(target=self.admin_session, args=(session_id,), daemon=True).start()
 
             elif msg["type"] == "admin_detach":
-                admin_id = msg["id"]
-                session = self.sessions.pop(admin_id, None)
+                session_id = msg["id"]
+                session = self.sessions.pop(session_id, None)
                 if session:
                     session.__exit__(None, None, None)
                     service.logger.logger_service.debug("Получено сообщение на отключение клиента")
-                    service.logger.logger_service.debug(f"admin_id '{admin_id}'")
+                    service.logger.logger_service.debug(f"session_id: '{session_id}'")
 
             elif msg["type"] == "command":
                 self.execute(msg["id"], ws, msg["command"], msg["command_id"])
@@ -220,12 +220,12 @@ class CMDClient(service.sys_manager.ResourceManagement):
         except Exception as e:
             service.logger.logger_service.error(f"Ошибка при обработке сообщения WS: {e}", exc_info=True)
 
-    def admin_session(self, admin_id):
+    def admin_session(self, session_id):
         try:
             with CmdContextManager() as session:
-                service.logger.logger_service.info(f"Запущена cmd-сессия для admin_id '{admin_id}'")
-                self.sessions[admin_id] = session
-                self.waiting_keypress[admin_id] = False
+                service.logger.logger_service.info(f"Запущена cmd-сессия: '{session_id}'")
+                self.sessions[session_id] = session
+                self.waiting_keypress[session_id] = False
 
                 timeout = time.time() + 2
                 while session.initial_output == None and time.time() < timeout:
@@ -234,14 +234,14 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 if session.initial_output:
                     self.ws.send(json.dumps({
                         "type": "result",
-                        "id": admin_id,
+                        "id": session_id,
                         "command_id": None,
                         "result": {
                             "output": f"\n{session.initial_output}"
                         }
                     }))
 
-                while admin_id in self.sessions:
+                while session_id in self.sessions:
                     if session.user_session == True:
                         if not is_process_alive(session.proc["hProcess"]):
                             break
@@ -251,32 +251,32 @@ class CMDClient(service.sys_manager.ResourceManagement):
 
                     time.sleep(0.1)
         except Exception:
-            service.logger.logger_service.error(f"Не удалось запустить cmd-сессию для admin_id '{admin_id}'",
+            service.logger.logger_service.error(f"Не удалось запустить cmd-сессию: '{session_id}'",
                                                 exc_info=True)
         finally:
             try:
-                service.logger.logger_service.info(f"Закрыта cmd-сессия admin_id '{admin_id}'")
+                service.logger.logger_service.info(f"Закрыта cmd-сессия: '{session_id}'")
                 self.ws.send(json.dumps({
                     "type": "session_closed",
-                    "id": admin_id
+                    "id": session_id
                 }))
             except Exception:
                 pass
 
-            self.sessions.pop(admin_id, None)
-            self.waiting_keypress.pop(admin_id, None)
+            self.sessions.pop(session_id, None)
+            self.waiting_keypress.pop(session_id, None)
 
-    def send_ctrl_c(self, admin_id):
-        session = self.sessions.get(admin_id)
+    def send_ctrl_c(self, session_id):
+        session = self.sessions.get(session_id)
         if not session or not session.proc:
             return
 
-        session = self.sessions.pop(admin_id, None)
+        session = self.sessions.pop(session_id, None)
         if session:
             session.__exit__(None, None, None)
 
 
-    def _send_cmd_output(self, admin_id, ws, command_id, session):
+    def _send_cmd_output(self, session_id, ws, command_id, session):
         last_pos = 0  # позиция в byte-буфере
         first_line_skipped = False  # первая строка отброшена или нет
 
@@ -288,7 +288,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
                     service.logger.logger_service.debug("Выход из потока вывода: WebSocket закрыт")
                     return
 
-                if admin_id not in self.sessions:
+                if session_id not in self.sessions:
                     return
 
                 raw = session.buffer
@@ -314,7 +314,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 if text:
                     ws.send(json.dumps({
                         "type": "result",
-                        "id": admin_id,
+                        "id": session_id,
                         "command_id": command_id,
                         "result": {
                             "output": text
@@ -331,43 +331,43 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 exc_info=True
             )
 
-            session = self.sessions.pop(admin_id, None)
+            session = self.sessions.pop(session_id, None)
             if session:
                 session.__exit__(None, None, None)
 
             ws.send(json.dumps({
                 "type": "session_closed",
-                "id": admin_id
+                "id": session_id
             }))
 
-    def execute(self, admin_id, ws, command, command_id):
-        session = self.sessions.get(admin_id)
+    def execute(self, session_id, ws, command, command_id):
+        session = self.sessions.get(session_id)
         if not session:
-            service.logger.logger_service.warning(f"Не найдена cmd-сессия для admin_id '{admin_id}'")
+            service.logger.logger_service.warning(f"Не найдена cmd-сессия: '{session_id}'")
             return
 
         try:
             session.clear()
             session.write(command + "\r\n")
-            service.logger.logger_service.debug(f"Выполнена команда от admin_id '{admin_id}'")
+            service.logger.logger_service.debug(f"Выполнена команда в рамках сессии:'{session_id}'")
             service.logger.logger_service.debug(f"Command_id: '{command_id}'")
             service.logger.logger_service.debug(f"Command: {command}")
         except Exception:
-            service.logger.logger_service.error(f"Не удалось выполнить команду от admin_id '{admin_id}'",
+            service.logger.logger_service.error(f"Не удалось выполнить команду в рамках сессии: '{session_id}'",
                                                 exc_info=True)
             service.logger.logger_service.debug(f"Command: {command}")
 
-            session = self.sessions.pop(admin_id, None)
+            session = self.sessions.pop(session_id, None)
             if session:
                 session.__exit__(None, None, None)
             ws.send(json.dumps({
                 "type": "session_closed",
-                "id": admin_id
+                "id": session_id
             }))
 
         threading.Thread(
             target=self._send_cmd_output,
-            args=(admin_id, ws, command_id, session),
+            args=(session_id, ws, command_id, session),
             daemon=True
         ).start()
 
