@@ -6,7 +6,10 @@ import win32ts
 import win32security
 import subprocess
 import service.configs
+import service.sys_manager
 import about
+
+resource_management = service.sys_manager.ResourceManagement()
 
 class AnyRemoteId:
     user_appdata = None
@@ -159,9 +162,10 @@ class AnyRemoteId:
             if os.path.exists(self.ad_file):
                 with open(self.ad_file, 'r', encoding='ascii') as f:
                     ad_id = f.read().strip()
+                    decrypted_ad_id = resource_management.decrypt_uuid_dpapi_machine(ad_id)
                     service.logger.logger_service.debug(
-                        f"Anydesk ID прочитан из файла '{os.path.abspath(self.ad_file)}': '{ad_id}'")
-                    AnyRemoteId.anydesk_id = ad_id
+                        f"Anydesk ID прочитан из файла '{os.path.abspath(self.ad_file)}': '{decrypted_ad_id}'")
+                    AnyRemoteId.anydesk_id = decrypted_ad_id
                     return AnyRemoteId.anydesk_id
         except Exception:
             service.logger.logger_service.error("Не удалось прочитать файл 'ad'", exc_info=True)
@@ -182,9 +186,11 @@ class AnyRemoteId:
             anydesk_id = lines[-1].strip()
             AnyRemoteId.anydesk_id = anydesk_id
 
+            encrypted_ad_id = resource_management.encrypt_uuid_dpapi_machine(str(anydesk_id))
+
             try:
                 with open(self.ad_file, 'w') as f:
-                    f.write(str(anydesk_id))
+                    f.write(str(encrypted_ad_id))
                 service.logger.logger_service.debug(
                     f"Anydesk ID '{anydesk_id}' записан в файл: '{os.path.abspath(self.ad_file)}'")
             except Exception:

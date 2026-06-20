@@ -6,6 +6,7 @@ date/
 gui/
 updater/
 uuid
+ad
 main-temp.py
 *.json
 *.exe

@@ -44,6 +44,26 @@ class ValidationFn(service.sys_manager.ProcessManagement):
         self.hh = None
         self.mm = None
 
+    def update_uuid_json(self):
+        uuid = f"{self.get_uuid()}.json"
+        uuid_json_path = os.path.join(about.current_path, "date", uuid)
+
+        try:
+            if not os.path.exists(uuid_json_path):
+                service.logger.logger_service.debug(f"Файл '{uuid_json_path}' не найден")
+                return
+
+            uuid_file = service.configs.read_config_file(about.current_path, uuid_json_path, "", create=False)
+
+            uuid_file["anydesk_id"] = str(get_remote_id.get_anydesk_id())
+            uuid_file["rustdesk_id"] = str(get_remote_id.get_rustdesk_id())
+            uuid_file["pr_id"] = str(get_remote_id.get_self_id())
+            uuid_file["url_rms"] = get_remote_id.get_server_url()
+            uuid_file["vc"] = about.version
+            service.configs.write_json_file(uuid_file, uuid_json_path)
+        except Exception:
+            service.logger.logger_service.error(f"Не обновить {uuid_json_path}", exc_info=True)
+
     def check_validation_date(self, i, model_kkt):
         try:
             try:
@@ -389,6 +409,8 @@ class ValidationFn(service.sys_manager.ProcessManagement):
                     self.remove_empty_serials_from_file(model_kkt)
 
                 if sending_data.sending_data_enabled == True:
+                    self.update_uuid_json()
+
                     service.logger.logger_service.info("Производится отправка данных на сервер")
                     sending_data.send_fiscals_data()
 
