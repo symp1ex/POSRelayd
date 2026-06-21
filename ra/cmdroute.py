@@ -4,6 +4,7 @@ import service.sys_manager
 import service.configs
 import service.crypto
 from ra.cmdrun import CmdContextManager, is_process_alive, decode_cmd_bytes
+from ra.rdsupervisor import RDAgentSupervisor
 import os
 import threading
 import json
@@ -46,6 +47,11 @@ class CMDClient(service.sys_manager.ResourceManagement):
         self.instance_id = str(uuid.uuid4())
         self.sessions = {}  # session_id -> CmdContextManager
         self.waiting_keypress = {}
+
+        self.rd_supervisor = RDAgentSupervisor(
+            ws_url=self.server_ws,
+            client_id=self.client_id
+        )
 
     def get_connection_data(self):
         try:
@@ -116,13 +122,24 @@ class CMDClient(service.sys_manager.ResourceManagement):
 
     def on_close(self, ws, *args):
         try:
+            # Сначала остановить RD-процессы.
+            # Это НЕ трогает self.sessions.
+            self.rd_supervisor.stop_all()
+
+            # Затем закрыть только CMD-сессии.
             for session_id, session in list(self.sessions.items()):
                 session.__exit__(None, None, None)
                 del self.sessions[session_id]
-                service.logger.logger_service.debug("Соединение с NoIP-сервером разорвано, WebSocket закрыт")
+
+            service.logger.logger_service.debug(
+                "Соединение с NoIP-сервером разорвано, WebSocket закрыт"
+            )
+
         except Exception:
-            service.logger.logger_service.error("Возникло неожиданное исключение при попытке закрыть WebSocket",
-                                                exc_info=True)
+            service.logger.logger_service.error(
+                "Возникло неожиданное исключение при попытке закрыть WebSocket",
+                exc_info=True
+            )
 
     def handshake(self, ws, msg):
         if msg.get("answer") == "register":
@@ -194,6 +211,42 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 service.logger.logger_service.debug("Received 'client_code' from server")
                 return
 
+            if msg.get("type") in ("rd_start", "rd_agent_start"):
+                session_id = msg.get("id") or msg.get("session_id")
+                token = msg.get("token")
+                turn_config = msg.get("turn") or msg.get("turn_config") or {}
+
+                service.logger.logger_service.info(
+                    f"Получена команда запуска rd-agent: type='{msg.get('type')}', session_id='{session_id}'"
+                )
+
+                self.rd_supervisor.start(
+                    session_id=session_id,
+                    token=token,
+                    turn_config=turn_config
+                )
+                return
+
+            if msg.get("type") in ("rd_stop", "rd_agent_stop"):
+                session_id = msg.get("id") or msg.get("session_id")
+
+                service.logger.logger_service.info(
+                    f"Получена команда остановки rd-agent: type='{msg.get('type')}', session_id='{session_id}'"
+                )
+
+                self.rd_supervisor.stop(session_id)
+                return
+
+            if msg.get("type") in ("rd_offer", "rd_answer", "rd_ice"):
+                session_id = msg.get("id") or msg.get("session_id")
+
+                service.logger.logger_service.debug(
+                    f"Получено RD signaling сообщение '{msg.get('type')}' для session_id='{session_id}'"
+                )
+
+                self.rd_supervisor.forward_signal(session_id, msg)
+                return
+
             if msg["type"] == "admin_attach":
                 session_id = msg["id"]
                 threading.Thread(target=self.admin_session, args=(session_id,), daemon=True).start()
@@ -205,6 +258,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
                     session.__exit__(None, None, None)
                     service.logger.logger_service.debug("Получено сообщение на отключение клиента")
                     service.logger.logger_service.debug(f"session_id: '{session_id}'")
+                    self.rd_supervisor.stop(session_id)
 
             elif msg["type"] == "command":
                 self.execute(msg["id"], ws, msg["command"], msg["command_id"])
@@ -265,6 +319,7 @@ class CMDClient(service.sys_manager.ResourceManagement):
 
             self.sessions.pop(session_id, None)
             self.waiting_keypress.pop(session_id, None)
+            self.rd_supervisor.stop(session_id)
 
     def send_ctrl_c(self, session_id):
         session = self.sessions.get(session_id)

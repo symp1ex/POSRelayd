@@ -177,9 +177,24 @@ class Service(win32serviceutil.ServiceFramework):
 
     def SvcStop(self):
         shtrihscanner.subprocess_kill("", shtrihscanner.exe_name)
-        service.logger.logger_service.debug(f"Cписок активных cmd-сессий: {self.cmdclient_instance.sessions}")
 
-        sessions = self.cmdclient_instance.sessions
+        if self.cmdclient_instance:
+            try:
+                service.logger.logger_service.debug(
+                    f"Cписок активных cmd-сессий: {self.cmdclient_instance.sessions}"
+                )
+                service.logger.logger_service.debug(
+                    f"Cписок активных rd-agent процессов: {self.cmdclient_instance.rd_supervisor.rd_agents}"
+                )
+                self.cmdclient_instance.rd_supervisor.stop_all()
+
+            except Exception:
+                service.logger.logger_service.error(
+                    "Не удалось остановить rd-agent процессы при остановке службы",
+                    exc_info=True
+                )
+
+        sessions = self.cmdclient_instance.sessions if self.cmdclient_instance else {}
 
         for admin_id in list(sessions):
             session = self.cmdclient_instance.sessions.pop(admin_id, None)

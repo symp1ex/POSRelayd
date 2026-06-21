@@ -5,6 +5,9 @@ import logging
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 
+name_log_folder = "logs"
+log_folder = os.path.join(about.current_path, name_log_folder)
+
 class StdoutRedirectHandler(logging.StreamHandler):
     def __init__(self):
         # Вызываем StreamHandler с sys.stdout, если он определен, иначе используем None
@@ -48,9 +51,6 @@ def logger(file_name, with_console=False):
 
         try: days = int(config.get("service", {}).get("log_days", 7))
         except Exception: days = 7
-
-        name_log_folder = "logs"
-        log_folder = os.path.join(about.current_path, name_log_folder)
 
         if not os.path.exists(log_folder):
             os.makedirs(log_folder)
