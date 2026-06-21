@@ -3,26 +3,30 @@ import os
 import subprocess
 import threading
 import time
-
+import service.crypto
 import about
 import service.logger
 import service.sys_manager
 
 sys_manager = service.sys_manager.ResourceManagement()
+client_identity = service.crypto.ClientIdentityManager()
 
 
 class RDAgentSupervisor:
-    def __init__(self, ws_url: str, client_id: str):
+    def __init__(self, ws_url: str, client_id: str, api_key: str):
         self.ws_url = ws_url
         self.client_id = client_id
+        self.api_key = api_key
         self.rd_agents = {}  # session_id -> subprocess.Popen
         self._lock = threading.RLock()
 
         self.base_dir = about.current_path
         self.agent_name = "rd-agent.exe"
-        self.agent_path = os.path.join(self.base_dir, self.agent_name)
+        self.agent_path = os.path.join(self.base_dir, sys_manager.resource_path, self.agent_name)
         self.work_dir = os.path.join(self.base_dir, sys_manager.resource_path)
         self.log_dir = os.path.abspath(service.logger.log_folder)
+        self.log_level = service.logger.level
+        self.log_days = service.logger.log_days
 
     def start(self, session_id: str, token: str, turn_config):
         if not session_id:
@@ -32,6 +36,12 @@ class RDAgentSupervisor:
         if not token:
             service.logger.logger_service.warning(
                 f"rd_start без token для session_id='{session_id}'"
+            )
+            return False
+
+        if not self.api_key:
+            service.logger.logger_service.warning(
+                f"rd-agent не будет запущен: пустой api_key для session_id='{session_id}'"
             )
             return False
 
@@ -61,10 +71,14 @@ class RDAgentSupervisor:
             args = [
                 self.agent_path,
                 "--ws-url", self.ws_url,
+                "--api-key", self.api_key,
                 "--client-id", self.client_id,
                 "--session-id", session_id,
-                "--log-folder", self.log_dir,
-                "--work-dir", self.work_dir,
+                "--token", token,
+                "--private-key-file", client_identity.PRIVATE_KEY_PATH,
+                "--log-dir", self.log_dir,
+                "--log-level", self.log_level,
+                "--log-retain-days", str(self.log_days),
             ]
 
             try:

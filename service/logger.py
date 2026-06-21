@@ -7,6 +7,9 @@ from datetime import datetime
 
 name_log_folder = "logs"
 log_folder = os.path.join(about.current_path, name_log_folder)
+level = "INFO"
+log_days = 7
+
 
 class StdoutRedirectHandler(logging.StreamHandler):
     def __init__(self):
@@ -32,6 +35,8 @@ def message_not_logger(message):
 
 def logger(file_name, with_console=False):
     import service.configs
+    global level, log_days
+
     try:
         # Словарь для маппинга строковых значений в константы logging
         LOG_LEVELS = {
@@ -60,6 +65,9 @@ def logger(file_name, with_console=False):
 
         if log_level not in LOG_LEVELS:
             log_level = "INFO"
+
+        level = log_level
+        log_days = days
 
         # Создаем логгер
         logger = logging.getLogger(file_name)

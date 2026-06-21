@@ -50,7 +50,8 @@ class CMDClient(service.sys_manager.ResourceManagement):
 
         self.rd_supervisor = RDAgentSupervisor(
             ws_url=self.server_ws,
-            client_id=self.client_id
+            client_id=self.client_id,
+            api_key=self.api_key,
         )
 
     def get_connection_data(self):
