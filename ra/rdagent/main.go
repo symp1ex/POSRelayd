@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"rdagent/internal/diag"
 	"syscall"
 
 	"rdagent/internal/app"
@@ -23,6 +24,7 @@ func main() {
 	logger.Configure(cfg.LogDir, cfg.LogLevel, cfg.LogRetainDays)
 
 	logger.RDAgent.Infof("rd-agent v%s starting...", version)
+	logger.RDAgent.Info(diag.CurrentTokenReport())
 	logger.RDAgent.Infof(
 		"Config: ws_url=%s client_id=%s session_id=%s instance_id=%s log_dir=%s log_level=%s log_retain_days=%d",
 		cfg.WSURL,

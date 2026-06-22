@@ -3,11 +3,12 @@ package rtc
 import (
 	"encoding/json"
 	"fmt"
-	"rdagent/internal/desktop"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
 
+	"rdagent/internal/control"
+	"rdagent/internal/desktop"
 	"rdagent/internal/logger"
 	"rdagent/internal/protocol"
 )
@@ -27,6 +28,8 @@ type Peer struct {
 	video      *desktop.Stream
 	iceServers []webrtc.ICEServer
 	seenRemote map[string]struct{}
+
+	control *control.Handler
 }
 
 func NewPeer(sessionID string, clientID string, sender SignalSender, iceServers []webrtc.ICEServer) *Peer {
@@ -36,6 +39,7 @@ func NewPeer(sessionID string, clientID string, sender SignalSender, iceServers 
 		sender:     sender,
 		iceServers: iceServers,
 		seenRemote: make(map[string]struct{}),
+		control:    control.NewHandler(sessionID),
 	}
 }
 
@@ -131,6 +135,10 @@ func (p *Peer) AddRemoteICE(candidate any) error {
 func (p *Peer) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.control != nil {
+		p.control.ReleaseAll()
+	}
 
 	if p.video != nil {
 		p.video.Stop()
@@ -279,19 +287,32 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 	})
 
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		if msg.IsString {
-			logger.RDAgent.Debugf("DataChannel message label=%s text=%s", label, string(msg.Data))
+		if label != "control" {
+			return
+		}
+		if !msg.IsString {
+			logger.RDAgent.Warnf("Control DataChannel binary message ignored: bytes=%d", len(msg.Data))
 			return
 		}
 
-		logger.RDAgent.Debugf("DataChannel binary message label=%s bytes=%d", label, len(msg.Data))
+		if err := p.control.Handle(dc, msg.Data); err != nil {
+			logger.RDAgent.Warnf("Control message handling failed: %v", err)
+		}
 	})
 
 	dc.OnClose(func() {
 		logger.RDAgent.Infof("DataChannel closed: label=%s", label)
+
+		if label == "control" {
+			p.control.ReleaseAll()
+		}
 	})
 
 	dc.OnError(func(err error) {
 		logger.RDAgent.Errorf("DataChannel error label=%s: %v", label, err)
+
+		if label == "control" {
+			p.control.ReleaseAll()
+		}
 	})
 }
