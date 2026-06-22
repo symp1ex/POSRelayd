@@ -250,7 +250,7 @@ func (s *Stream) startFFmpegLocked() error {
 
 			frameCount++
 			if time.Since(lastLog) >= 2*time.Second {
-				logger.RDAgent.Infof("VP8 frames sent: %d in last 2s", frameCount)
+				logger.RDAgent.Debugf("VP8 frames sent: %d in last 2s", frameCount)
 				frameCount = 0
 				lastLog = time.Now()
 			}

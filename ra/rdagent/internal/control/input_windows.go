@@ -5,6 +5,7 @@ package control
 import (
 	"fmt"
 	"math"
+	"rdagent/internal/logger"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -43,8 +44,8 @@ const (
 
 type input struct {
 	Type uint32
-	Ki   keyboardInput
-	Pad  [16]byte
+	_    uint32
+	U    [32]byte
 }
 
 type keyboardInput struct {
@@ -53,12 +54,6 @@ type keyboardInput struct {
 	DwFlags     uint32
 	Time        uint32
 	DwExtraInfo uintptr
-}
-
-type mouseInputOnly struct {
-	Type uint32
-	Mi   mouseInput
-	Pad  [8]byte
 }
 
 type mouseInput struct {
@@ -70,6 +65,29 @@ type mouseInput struct {
 	DwExtraInfo uintptr
 }
 
+func newMouseInput(flags uint32, data uint32) input {
+	var in input
+	in.Type = inputMouse
+
+	mi := (*mouseInput)(unsafe.Pointer(&in.U[0]))
+	mi.MouseData = data
+	mi.DwFlags = flags
+
+	return in
+}
+
+func newKeyboardInput(vk uint16, sc uint16, flags uint32) input {
+	var in input
+	in.Type = inputKeyboard
+
+	ki := (*keyboardInput)(unsafe.Pointer(&in.U[0]))
+	ki.WVk = vk
+	ki.WScan = sc
+	ki.DwFlags = flags
+
+	return in
+}
+
 type Injector struct {
 	mu       sync.Mutex
 	focused  bool
@@ -77,6 +95,14 @@ type Injector struct {
 }
 
 func NewInjector() *Injector {
+	logger.RDAgent.Debugf(
+		"Windows input ABI sizes: input=%d mouseInput=%d keyboardInput=%d uintptr=%d",
+		unsafe.Sizeof(input{}),
+		unsafe.Sizeof(mouseInput{}),
+		unsafe.Sizeof(keyboardInput{}),
+		unsafe.Sizeof(uintptr(0)),
+	)
+
 	return &Injector{
 		focused:  false,
 		downKeys: make(map[uint16]bool),
@@ -237,24 +263,9 @@ func normalizedToScreen(x, y float64) (int, int) {
 }
 
 func sendMouse(flags uint32, data uint32) error {
-	in := mouseInputOnly{
-		Type: inputMouse,
-		Mi: mouseInput{
-			MouseData: data,
-			DwFlags:   flags,
-		},
-	}
+	in := newMouseInput(flags, data)
 
-	ret, _, err := procSendInput.Call(
-		1,
-		uintptr(unsafe.Pointer(&in)),
-		unsafe.Sizeof(in),
-	)
-	if ret == 0 {
-		return fmt.Errorf("SendInput mouse failed: %w", err)
-	}
-
-	return nil
+	return sendInputOne("mouse", &in)
 }
 
 func sendKey(vk uint16, keyUp bool) error {
@@ -268,22 +279,30 @@ func sendKey(vk uint16, keyUp bool) error {
 		flags |= keyEventFExtended
 	}
 
-	in := input{
-		Type: inputKeyboard,
-		Ki: keyboardInput{
-			WVk:     0,
-			WScan:   uint16(sc),
-			DwFlags: flags,
-		},
-	}
+	in := newKeyboardInput(0, uint16(sc), flags)
+
+	return sendInputOne("key", &in)
+}
+
+func sendInputOne(kind string, in *input) error {
+	size := unsafe.Sizeof(*in)
 
 	ret, _, err := procSendInput.Call(
 		1,
-		uintptr(unsafe.Pointer(&in)),
-		unsafe.Sizeof(in),
+		uintptr(unsafe.Pointer(in)),
+		size,
 	)
-	if ret == 0 {
-		return fmt.Errorf("SendInput key failed: %w", err)
+
+	logger.RDAgent.Debugf(
+		"SendInput result: kind=%s ret=%d cbSize=%d err=%v",
+		kind,
+		ret,
+		size,
+		err,
+	)
+
+	if ret != 1 {
+		return fmt.Errorf("SendInput %s failed: ret=%d cbSize=%d err=%w", kind, ret, size, err)
 	}
 
 	return nil

@@ -92,9 +92,9 @@ class RDAgentSupervisor:
                 if hasattr(subprocess, "CREATE_NO_WINDOW"):
                     creationflags |= subprocess.CREATE_NO_WINDOW
 
-                from ra.winproc import spawn_hidden_as_active_user
+                from ra.winproc import spawn_hidden_as_local_system_active_session
 
-                proc = spawn_hidden_as_active_user(
+                proc = spawn_hidden_as_local_system_active_session(
                     args=args,
                     cwd=self.work_dir,
                     env=env,

@@ -1,7 +1,5 @@
 import json
-import os
 import subprocess
-
 import win32api
 import win32con
 import win32event
@@ -11,8 +9,18 @@ import win32pipe
 import win32process
 import win32security
 import win32ts
-
+import ntsecuritycon
 import service.logger
+
+TOKEN_ASSIGN_PRIMARY = 0x0001
+TOKEN_DUPLICATE = 0x0002
+TOKEN_IMPERSONATE = 0x0004
+TOKEN_QUERY = 0x0008
+TOKEN_ADJUST_PRIVILEGES = 0x0020
+TOKEN_ADJUST_DEFAULT = 0x0080
+TOKEN_ADJUST_SESSIONID = 0x0100
+
+TOKEN_SESSION_ID = 12
 
 
 class WinUserProcess:
@@ -136,6 +144,176 @@ def create_job_kill_on_close():
 def quote_cmdline(args):
     return subprocess.list2cmdline(args)
 
+
+def create_pipes_for_child():
+    sa = win32security.SECURITY_ATTRIBUTES()
+    sa.bInheritHandle = True
+
+    stdin_r, stdin_w = win32pipe.CreatePipe(sa, 0)
+    win32api.SetHandleInformation(
+        stdin_w,
+        win32con.HANDLE_FLAG_INHERIT,
+        0,
+    )
+
+    stdout_r, stdout_w = win32pipe.CreatePipe(sa, 0)
+    win32api.SetHandleInformation(
+        stdout_r,
+        win32con.HANDLE_FLAG_INHERIT,
+        0,
+    )
+
+    stderr_r, stderr_w = win32pipe.CreatePipe(sa, 0)
+    win32api.SetHandleInformation(
+        stderr_r,
+        win32con.HANDLE_FLAG_INHERIT,
+        0,
+    )
+
+    return stdin_r, stdin_w, stdout_r, stdout_w, stderr_r, stderr_w
+
+def build_hidden_startupinfo(stdin_r=None, stdout_w=None, stderr_w=None, desktop="WinSta0\\Default"):
+    startup = win32process.STARTUPINFO()
+    startup.lpDesktop = desktop
+    startup.dwFlags |= win32con.STARTF_USESHOWWINDOW
+    startup.wShowWindow = win32con.SW_HIDE
+
+    if stdin_r is not None and stdout_w is not None and stderr_w is not None:
+        startup.dwFlags |= win32con.STARTF_USESTDHANDLES
+        startup.hStdInput = stdin_r
+        startup.hStdOutput = stdout_w
+        startup.hStdError = stderr_w
+
+    return startup
+
+def duplicate_current_process_token_for_session(session_id: int):
+    """
+    Берём токен текущего процесса службы.
+    Если служба работает как LocalSystem, то и новый rd-agent будет LocalSystem.
+    Затем переносим token в активную пользовательскую session_id.
+    """
+    current_process = win32api.GetCurrentProcess()
+
+    token_access = (
+            TOKEN_QUERY |
+            TOKEN_DUPLICATE |
+            TOKEN_ASSIGN_PRIMARY |
+            TOKEN_ADJUST_DEFAULT |
+            TOKEN_ADJUST_SESSIONID
+    )
+
+    service_token = win32security.OpenProcessToken(
+        current_process,
+        token_access,
+    )
+
+    primary_token = win32security.DuplicateTokenEx(
+        service_token,
+        win32security.SecurityImpersonation,
+        token_access,
+        win32security.TokenPrimary,
+        None,
+    )
+
+    win32security.SetTokenInformation(
+        primary_token,
+        TOKEN_SESSION_ID,
+        session_id,
+    )
+
+    return primary_token
+
+def spawn_hidden_as_local_system_active_session(args, cwd=None, env=None):
+    """
+    Запускает процесс как LocalSystem, но в активной пользовательской session.
+    Использовать для rd-agent, которому нужен доступ к secure desktop / UAC.
+    """
+    session_id = win32ts.WTSGetActiveConsoleSessionId()
+    service.logger.logger_service.info(
+        f"Запуск LocalSystem-процесса в активной session_id={session_id}"
+    )
+
+    if session_id == 0xFFFFFFFF:
+        raise RuntimeError("Нет активной console session")
+
+    system_token = duplicate_current_process_token_for_session(session_id)
+
+    stdin_r = stdin_w = None
+    stdout_r = stdout_w = None
+    stderr_r = stderr_w = None
+
+    try:
+        stdin_r, stdin_w, stdout_r, stdout_w, stderr_r, stderr_w = create_pipes_for_child()
+
+        startup = build_hidden_startupinfo(
+            stdin_r=stdin_r,
+            stdout_w=stdout_w,
+            stderr_w=stderr_w,
+            desktop="WinSta0\\Default",
+        )
+
+        creation_flags = (
+            win32con.CREATE_NEW_PROCESS_GROUP |
+            win32con.CREATE_NO_WINDOW
+        )
+
+        cmdline = quote_cmdline(args)
+        job = create_job_kill_on_close()
+
+        proc_info = win32process.CreateProcessAsUser(
+            system_token,
+            None,
+            cmdline,
+            None,
+            None,
+            True,
+            creation_flags,
+            env,
+            cwd,
+            startup,
+        )
+
+        try:
+            win32job.AssignProcessToJobObject(job, proc_info[0])
+        except Exception:
+            service.logger.logger_service.warning(
+                f"Не удалось добавить LocalSystem rd-agent в job object: pid={proc_info[2]}",
+                exc_info=True,
+            )
+
+        for h in (stdin_r, stdout_w, stderr_w):
+            if h:
+                try:
+                    win32api.CloseHandle(h)
+                except Exception:
+                    pass
+
+        service.logger.logger_service.info(
+            f"LocalSystem rd-agent запущен: pid={proc_info[2]}, session_id={session_id}"
+        )
+
+        return WinUserProcess(
+            proc_info=proc_info,
+            stdin_w=stdin_w,
+            stdout_r=stdout_r,
+            stderr_r=stderr_r,
+            job=job,
+        )
+
+    except Exception:
+        for h in (stdin_r, stdin_w, stdout_r, stdout_w, stderr_r, stderr_w):
+            if h:
+                try:
+                    win32api.CloseHandle(h)
+                except Exception:
+                    pass
+        raise
+
+    finally:
+        try:
+            win32api.CloseHandle(system_token)
+        except Exception:
+            pass
 
 def spawn_elevated_as_active_user(args, cwd=None, env=None, hidden=True, with_pipes=True):
     """

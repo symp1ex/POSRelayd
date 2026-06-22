@@ -12,7 +12,7 @@ import (
 	"rdagent/internal/logger"
 )
 
-const version = "0.2.1.0"
+const version = "0.2.1.2"
 
 func main() {
 	cfg, err := config.Parse(os.Args[1:])
@@ -24,7 +24,7 @@ func main() {
 	logger.Configure(cfg.LogDir, cfg.LogLevel, cfg.LogRetainDays)
 
 	logger.RDAgent.Infof("rd-agent v%s starting...", version)
-	logger.RDAgent.Info(diag.CurrentTokenReport())
+	logger.RDAgent.Debug(diag.CurrentTokenReport())
 	logger.RDAgent.Infof(
 		"Config: ws_url=%s client_id=%s session_id=%s instance_id=%s log_dir=%s log_level=%s log_retain_days=%d",
 		cfg.WSURL,
