@@ -172,8 +172,8 @@ class Service(win32serviceutil.ServiceFramework):
         self.cmdclient_instance = None
 
     def cmdclient_init(self):
-        import ra.cmdroute
-        self.cmdclient_instance = ra.cmdroute.CMDClient()
+        import ra.routing
+        self.cmdclient_instance = ra.routing.CMDClient()
 
     def SvcStop(self):
         shtrihscanner.subprocess_kill("", shtrihscanner.exe_name)
