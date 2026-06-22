@@ -21,7 +21,7 @@ class RDAgentSupervisor:
         self._lock = threading.RLock()
 
         self.base_dir = about.current_path
-        self.agent_name = "rd-agent.exe"
+        self.agent_name = "prrd.exe"
         self.agent_path = os.path.join(self.base_dir, sys_manager.resource_path, "bin", self.agent_name)
 
         self.work_dir = os.path.join(self.base_dir, sys_manager.resource_path, "bin")
