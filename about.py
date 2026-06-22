@@ -2,7 +2,7 @@ import os
 import sys
 
 service_name = "POSRelayd"
-version = "2.6.1.1"
+version = "2.6.1.2"
 
 '''
 в зависимости от того, как запускается служба, нужно менять переменную current_path

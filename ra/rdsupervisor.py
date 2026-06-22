@@ -22,8 +22,12 @@ class RDAgentSupervisor:
 
         self.base_dir = about.current_path
         self.agent_name = "rd-agent.exe"
-        self.agent_path = os.path.join(self.base_dir, sys_manager.resource_path, self.agent_name)
-        self.work_dir = os.path.join(self.base_dir, sys_manager.resource_path)
+        self.agent_path = os.path.join(self.base_dir, sys_manager.resource_path, "bin", self.agent_name)
+
+        self.work_dir = os.path.join(self.base_dir, sys_manager.resource_path, "bin")
+        if not os.path.exists(self.work_dir):
+            os.makedirs(self.work_dir)
+
         self.log_dir = os.path.abspath(service.logger.log_folder)
         self.log_level = service.logger.level
         self.log_days = service.logger.log_days
