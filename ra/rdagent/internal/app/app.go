@@ -38,7 +38,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 		cfg:      cfg,
 		id:       id,
 		ws:       wsClient,
-		rtcPeer:  rtc.NewPeer(cfg.SessionID, cfg.ClientID, wsClient),
+		rtcPeer:  rtc.NewPeer(cfg.SessionID, cfg.ClientID, wsClient, cfg.ICEServers),
 		incoming: make(chan protocol.Message, 128),
 	}
 
@@ -134,6 +134,16 @@ func (a *App) handleMessage(msg protocol.Message) error {
 		logger.RDAgent.Info("RD stop received")
 		a.rtcPeer.Close()
 		_ = a.sendClosed("rd_stop received")
+		return context.Canceled
+
+	case protocol.MessageRDClosed:
+		logger.RDAgent.Infof("RD closed received: %s", msg.Error)
+		a.rtcPeer.Close()
+		return context.Canceled
+
+	case "rd_shutdown":
+		logger.RDAgent.Info("RD shutdown received")
+		a.rtcPeer.Close()
 		return context.Canceled
 
 	case protocol.MessageRDError:

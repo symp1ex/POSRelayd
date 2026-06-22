@@ -92,18 +92,12 @@ class RDAgentSupervisor:
                 if hasattr(subprocess, "CREATE_NO_WINDOW"):
                     creationflags |= subprocess.CREATE_NO_WINDOW
 
-                proc = subprocess.Popen(
-                    args,
+                from ra.winproc import spawn_hidden_as_active_user
+
+                proc = spawn_hidden_as_active_user(
+                    args=args,
                     cwd=self.work_dir,
                     env=env,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    shell=False,
-                    creationflags=creationflags,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
                 )
 
                 self.rd_agents[session_id] = proc
@@ -134,22 +128,14 @@ class RDAgentSupervisor:
         with self._lock:
             proc = self.rd_agents.get(session_id)
 
-            if not proc or proc.poll() is not None:
+            if not proc:
                 service.logger.logger_service.warning(
                     f"Получено RD signaling, но rd-agent не активен для session_id='{session_id}'"
-                )
-                self.rd_agents.pop(session_id, None)
-                return False
-
-            if not proc.stdin:
-                service.logger.logger_service.warning(
-                    f"stdin недоступен у rd-agent для session_id='{session_id}'"
                 )
                 return False
 
             try:
-                proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-                proc.stdin.flush()
+                proc.write_json(message)
                 return True
             except Exception:
                 service.logger.logger_service.error(
@@ -167,38 +153,26 @@ class RDAgentSupervisor:
             return
 
         try:
-            if proc.poll() is not None:
-                service.logger.logger_service.debug(
-                    f"rd-agent уже завершён для session_id='{session_id}'"
-                )
-                return
-
             service.logger.logger_service.info(
                 f"Остановка rd-agent для session_id='{session_id}', pid={proc.pid}"
             )
 
             try:
-                if proc.stdin:
-                    proc.stdin.write(json.dumps({
-                        "type": "rd_shutdown",
-                        "id": session_id
-                    }) + "\n")
-                    proc.stdin.flush()
+                proc.write_json({
+                    "type": "rd_shutdown",
+                    "id": session_id,
+                    "session_id": session_id,
+                })
             except Exception:
                 pass
 
-            proc.terminate()
-
-            deadline = time.time() + timeout
-            while proc.poll() is None and time.time() < deadline:
-                time.sleep(0.1)
-
-            if proc.poll() is None:
+            if not proc.wait(int(timeout * 1000)):
                 service.logger.logger_service.warning(
                     f"rd-agent не завершился штатно, будет принудительно остановлен: session_id='{session_id}', pid={proc.pid}"
                 )
-                proc.kill()
-                proc.wait(timeout=2)
+                proc.terminate()
+
+            proc.close()
 
         except Exception:
             service.logger.logger_service.error(

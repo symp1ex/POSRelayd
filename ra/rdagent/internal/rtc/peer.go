@@ -3,6 +3,7 @@ package rtc
 import (
 	"encoding/json"
 	"fmt"
+	"rdagent/internal/desktop"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
@@ -21,14 +22,20 @@ type Peer struct {
 	sender    SignalSender
 
 	mu sync.Mutex
-	pc *webrtc.PeerConnection
+
+	pc         *webrtc.PeerConnection
+	video      *desktop.Stream
+	iceServers []webrtc.ICEServer
+	seenRemote map[string]struct{}
 }
 
-func NewPeer(sessionID string, clientID string, sender SignalSender) *Peer {
+func NewPeer(sessionID string, clientID string, sender SignalSender, iceServers []webrtc.ICEServer) *Peer {
 	return &Peer{
-		sessionID: sessionID,
-		clientID:  clientID,
-		sender:    sender,
+		sessionID:  sessionID,
+		clientID:   clientID,
+		sender:     sender,
+		iceServers: iceServers,
+		seenRemote: make(map[string]struct{}),
 	}
 }
 
@@ -63,6 +70,15 @@ func (p *Peer) HandleOffer(sdp string) error {
 
 	if err := pc.SetLocalDescription(answer); err != nil {
 		return fmt.Errorf("set local answer: %w", err)
+	}
+
+	if p.video != nil {
+		if err := p.video.Start(); err != nil {
+			_ = pc.Close()
+			p.pc = nil
+			p.video = nil
+			return fmt.Errorf("start desktop stream: %w", err)
+		}
 	}
 
 	if err := p.sender.Send(protocol.Message{
@@ -116,6 +132,11 @@ func (p *Peer) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.video != nil {
+		p.video.Stop()
+		p.video = nil
+	}
+
 	if p.pc == nil {
 		return
 	}
@@ -125,18 +146,19 @@ func (p *Peer) Close() {
 	}
 
 	p.pc = nil
-	logger.RDAgent.Info("PeerConnection closed")
+	logger.RDAgent.Info("PeerConnection and desktop stream closed")
 }
 
 func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
+	iceServers := p.iceServers
+	if len(iceServers) == 0 {
+		iceServers = []webrtc.ICEServer{
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
+		}
+	}
+
 	cfg := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{
-					"stun:stun.l.google.com:19302",
-				},
-			},
-		},
+		ICEServers: iceServers,
 	}
 
 	pc, err := webrtc.NewPeerConnection(cfg)
@@ -205,10 +227,39 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 		p.pc = nil
 		return nil, fmt.Errorf("create control datachannel: %w", err)
 	}
-
 	p.configureDataChannel(control, "local-created")
 
-	logger.RDAgent.Info("PeerConnection created")
+	videoTrack, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypeVP8,
+			ClockRate: 90000,
+		},
+		"desktop",
+		p.sessionID,
+	)
+
+	if err != nil {
+		_ = pc.Close()
+		p.pc = nil
+		return nil, fmt.Errorf("create desktop video track: %w", err)
+	}
+
+	rtpSender, err := pc.AddTrack(videoTrack)
+	if err != nil {
+		_ = pc.Close()
+		p.pc = nil
+		return nil, fmt.Errorf("add desktop track: %w", err)
+	}
+
+	stream, err := desktop.NewStream(p.sessionID, videoTrack, rtpSender)
+	if err != nil {
+		_ = pc.Close()
+		p.pc = nil
+		return nil, fmt.Errorf("create desktop stream: %w", err)
+	}
+	p.video = stream
+
+	logger.RDAgent.Info("PeerConnection with desktop video track created")
 	return pc, nil
 }
 

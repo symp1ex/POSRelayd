@@ -1,9 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/pion/webrtc/v4"
+	"os"
 
 	"github.com/google/uuid"
 )
@@ -22,6 +25,9 @@ type Config struct {
 	LogRetainDays int
 
 	InsecureSkipVerify bool
+
+	TURNJSON   string
+	ICEServers []webrtc.ICEServer
 }
 
 func Parse(args []string) (Config, error) {
@@ -42,8 +48,13 @@ func Parse(args []string) (Config, error) {
 	fs.IntVar(&cfg.LogRetainDays, "log-retain-days", 14, "How many days rotated logs are retained")
 
 	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure-skip-verify", false, "Disable TLS certificate verification for wss")
+	fs.StringVar(&cfg.TURNJSON, "turn-json", os.Getenv("RD_TURN_JSON"), "TURN/STUN JSON config")
 
 	if err := fs.Parse(args); err != nil {
+		return Config{}, err
+	}
+
+	if err := cfg.parseICEServers(); err != nil {
 		return Config{}, err
 	}
 
@@ -56,6 +67,33 @@ func Parse(args []string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func (c *Config) parseICEServers() error {
+	if c.TURNJSON == "" {
+		return nil
+	}
+
+	var raw struct {
+		ICEServers []struct {
+			URLs       []string `json:"urls"`
+			Username   string   `json:"username,omitempty"`
+			Credential string   `json:"credential,omitempty"`
+		} `json:"ice_servers"`
+	}
+
+	if err := json.Unmarshal([]byte(c.TURNJSON), &raw); err != nil {
+		return fmt.Errorf("parse TURN JSON: %w", err)
+	}
+
+	for _, s := range raw.ICEServers {
+		c.ICEServers = append(c.ICEServers, webrtc.ICEServer{
+			URLs:       s.URLs,
+			Username:   s.Username,
+			Credential: s.Credential,
+		})
+	}
+	return nil
 }
 
 func (c Config) Validate() error {
