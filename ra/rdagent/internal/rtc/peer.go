@@ -226,16 +226,13 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 	})
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		if dc.Label() != "control" {
+			logger.RDAgent.Warnf("Unexpected DataChannel ignored: label=%s", dc.Label())
+			return
+		}
+
 		p.configureDataChannel(dc, "remote-created")
 	})
-
-	control, err := pc.CreateDataChannel("control", nil)
-	if err != nil {
-		_ = pc.Close()
-		p.pc = nil
-		return nil, fmt.Errorf("create control datachannel: %w", err)
-	}
-	p.configureDataChannel(control, "local-created")
 
 	videoTrack, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{
@@ -280,8 +277,16 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 		logger.RDAgent.Infof("DataChannel open: label=%s", label)
 
 		if label == "control" {
+			if err := p.control.BindSender(dc); err != nil {
+				logger.RDAgent.Warnf("Clipboard watcher start failed: %v", err)
+			}
+
 			if err := dc.SendText(`{"type":"rd_agent_ready"}`); err != nil {
 				logger.RDAgent.Warnf("DataChannel initial send failed: %v", err)
+			}
+
+			if err := p.control.SendClipboardSnapshot(dc); err != nil {
+				logger.RDAgent.Warnf("Initial clipboard snapshot send failed: %v", err)
 			}
 		}
 	})
@@ -304,6 +309,7 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 		logger.RDAgent.Infof("DataChannel closed: label=%s", label)
 
 		if label == "control" {
+			p.control.UnbindSender()
 			p.control.ReleaseAll()
 		}
 	})
@@ -312,6 +318,7 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 		logger.RDAgent.Errorf("DataChannel error label=%s: %v", label, err)
 
 		if label == "control" {
+			p.control.UnbindSender()
 			p.control.ReleaseAll()
 		}
 	})

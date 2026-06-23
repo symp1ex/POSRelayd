@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -23,16 +24,67 @@ var (
 	procSetClipboardData           = user32cb.NewProc("SetClipboardData")
 	procGetClipboardData           = user32cb.NewProc("GetClipboardData")
 	procIsClipboardFormatAvailable = user32cb.NewProc("IsClipboardFormatAvailable")
+	procCreateWindowExW            = user32cb.NewProc("CreateWindowExW")
+	procDestroyWindow              = user32cb.NewProc("DestroyWindow")
 
 	procGlobalAlloc  = kernel32cb.NewProc("GlobalAlloc")
 	procGlobalLock   = kernel32cb.NewProc("GlobalLock")
 	procGlobalUnlock = kernel32cb.NewProc("GlobalUnlock")
+	procGlobalFree   = kernel32cb.NewProc("GlobalFree")
 )
 
 const (
 	cfUnicodeText = 13
 	gmemMoveable  = 0x0002
 )
+
+func createClipboardOwnerWindow() (uintptr, error) {
+	className, err := syscall.UTF16PtrFromString("STATIC")
+	if err != nil {
+		return 0, err
+	}
+
+	windowName, err := syscall.UTF16PtrFromString("rdagent-clipboard-owner")
+	if err != nil {
+		return 0, err
+	}
+
+	hwnd, _, callErr := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(className)),
+		uintptr(unsafe.Pointer(windowName)),
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+	)
+	if hwnd == 0 {
+		return 0, fmt.Errorf("CreateWindowExW failed: %w", callErr)
+	}
+
+	return hwnd, nil
+}
+
+func openClipboardWithRetry(owner uintptr) error {
+	var lastErr error
+
+	for attempt := 0; attempt < 20; attempt++ {
+		if ret, _, err := procOpenClipboard.Call(owner); ret != 0 {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	return fmt.Errorf("OpenClipboard failed after retries: %w", lastErr)
+}
 
 type Clipboard struct {
 	mu           sync.Mutex
@@ -89,19 +141,53 @@ func (c *Clipboard) GetText() (string, string, error) {
 	return text, revision, nil
 }
 
+func (c *Clipboard) GetTextIfChanged() (string, string, bool, error) {
+	text, err := getClipboardText()
+	if err != nil {
+		return "", "", false, err
+	}
+
+	revision := Revision(text)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.lastRevision == revision {
+		return "", revision, false, nil
+	}
+
+	c.lastRevision = revision
+	c.lastOrigin = ""
+	c.lastSeq = 0
+
+	return text, revision, true, nil
+}
+
 func Revision(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func setClipboardText(text string) error {
-	if ret, _, err := procOpenClipboard.Call(0); ret == 0 {
-		return fmt.Errorf("OpenClipboard failed: %w", err)
+	desktop, err := bindInputDesktop("clipboard-set")
+	if err != nil {
+		return fmt.Errorf("clipboard set bind desktop: %w", err)
+	}
+	defer desktop.Close()
+
+	owner, err := createClipboardOwnerWindow()
+	if err != nil {
+		return fmt.Errorf("create clipboard owner window desktop=%s: %w", desktop.Name(), err)
+	}
+	defer procDestroyWindow.Call(owner)
+
+	if err := openClipboardWithRetry(owner); err != nil {
+		return err
 	}
 	defer procCloseClipboard.Call()
 
 	if ret, _, err := procEmptyClipboard.Call(); ret == 0 {
-		return fmt.Errorf("EmptyClipboard failed: %w", err)
+		return fmt.Errorf("EmptyClipboard desktop=%s failed: %w", desktop.Name(), err)
 	}
 
 	utf16, err := syscall.UTF16FromString(text)
@@ -118,6 +204,7 @@ func setClipboardText(text string) error {
 
 	ptr, _, err := procGlobalLock.Call(hMem)
 	if ptr == 0 {
+		procGlobalFree.Call(hMem)
 		return fmt.Errorf("GlobalLock failed: %w", err)
 	}
 
@@ -125,30 +212,38 @@ func setClipboardText(text string) error {
 	procGlobalUnlock.Call(hMem)
 
 	if ret, _, err := procSetClipboardData.Call(cfUnicodeText, hMem); ret == 0 {
-		return fmt.Errorf("SetClipboardData failed: %w", err)
+		procGlobalFree.Call(hMem)
+		return fmt.Errorf("SetClipboardData desktop=%s failed: %w", desktop.Name(), err)
 	}
 
 	return nil
 }
 
 func getClipboardText() (string, error) {
+	desktop, err := bindInputDesktop("clipboard-get")
+	if err != nil {
+		return "", fmt.Errorf("clipboard get bind desktop: %w", err)
+	}
+	defer desktop.Close()
+
 	if ret, _, _ := procIsClipboardFormatAvailable.Call(cfUnicodeText); ret == 0 {
 		return "", nil
 	}
 
-	if ret, _, err := procOpenClipboard.Call(0); ret == 0 {
-		return "", fmt.Errorf("OpenClipboard failed: %w", err)
+	if err := openClipboardWithRetry(0); err != nil {
+		return "", err
 	}
+
 	defer procCloseClipboard.Call()
 
 	h, _, err := procGetClipboardData.Call(cfUnicodeText)
 	if h == 0 {
-		return "", fmt.Errorf("GetClipboardData failed: %w", err)
+		return "", fmt.Errorf("GetClipboardData desktop=%s failed: %w", desktop.Name(), err)
 	}
 
 	ptr, _, err := procGlobalLock.Call(h)
 	if ptr == 0 {
-		return "", fmt.Errorf("GlobalLock failed: %w", err)
+		return "", fmt.Errorf("GlobalLock desktop=%s failed: %w", desktop.Name(), err)
 	}
 	defer procGlobalUnlock.Call(h)
 

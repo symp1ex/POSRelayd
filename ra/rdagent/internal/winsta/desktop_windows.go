@@ -9,8 +9,6 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-
-	"rdagent/internal/logger"
 )
 
 var (
@@ -74,13 +72,7 @@ func BindCurrentThreadToInputDesktop(reason string) (*BoundDesktop, error) {
 		runtime.UnlockOSThread()
 		return nil, fmt.Errorf("SetThreadDesktop name=%s failed: %w", name, setErr)
 	}
-
-	logger.RDAgent.Debugf(
-		"Thread bound to input desktop: reason=%s desktop=%s",
-		reason,
-		name,
-	)
-
+	
 	return &BoundDesktop{
 		handle: hDesk,
 		name:   name,
