@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"rdagent/internal/logger"
+	"rdagent/internal/winsta"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -20,8 +21,10 @@ var (
 )
 
 const (
-	smCXScreen = 0
-	smCYScreen = 1
+	smXVirtualScreen  = 76
+	smYVirtualScreen  = 77
+	smCXVirtualScreen = 78
+	smCYVirtualScreen = 79
 
 	inputMouse    = 0
 	inputKeyboard = 1
@@ -109,6 +112,15 @@ func NewInjector() *Injector {
 	}
 }
 
+func bindInputDesktop(reason string) (*winsta.BoundDesktop, error) {
+	desktop, err := winsta.BindCurrentThreadToInputDesktop(reason)
+	if err != nil {
+		return nil, err
+	}
+
+	return desktop, nil
+}
+
 func (i *Injector) SetFocus(focused bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -127,6 +139,12 @@ func (i *Injector) MouseMoveNormalized(x, y float64) error {
 		return nil
 	}
 
+	desktop, err := bindInputDesktop("mouse-move")
+	if err != nil {
+		return fmt.Errorf("mouse move bind desktop: %w", err)
+	}
+	defer desktop.Close()
+
 	px, py := normalizedToScreen(x, y)
 
 	ret, _, err := procSetCursorPos.Call(
@@ -134,7 +152,7 @@ func (i *Injector) MouseMoveNormalized(x, y float64) error {
 		uintptr(py),
 	)
 	if ret == 0 {
-		return fmt.Errorf("SetCursorPos failed: %w", err)
+		return fmt.Errorf("SetCursorPos desktop=%s failed: %w", desktop.Name(), err)
 	}
 
 	return nil
@@ -147,6 +165,12 @@ func (i *Injector) MouseButton(x, y float64, button string, down bool) error {
 	if !i.focused {
 		return nil
 	}
+
+	desktop, err := bindInputDesktop("mouse-button")
+	if err != nil {
+		return fmt.Errorf("mouse button bind desktop: %w", err)
+	}
+	defer desktop.Close()
 
 	px, py := normalizedToScreen(x, y)
 	_, _, _ = procSetCursorPos.Call(uintptr(px), uintptr(py))
@@ -175,7 +199,11 @@ func (i *Injector) MouseButton(x, y float64, button string, down bool) error {
 		return nil
 	}
 
-	return sendMouse(flags, 0)
+	if err := sendMouse(flags, 0); err != nil {
+		return fmt.Errorf("send mouse desktop=%s: %w", desktop.Name(), err)
+	}
+
+	return nil
 }
 
 func (i *Injector) MouseWheel(x, y float64, deltaX, deltaY int32) error {
@@ -186,18 +214,24 @@ func (i *Injector) MouseWheel(x, y float64, deltaX, deltaY int32) error {
 		return nil
 	}
 
+	desktop, err := bindInputDesktop("mouse-wheel")
+	if err != nil {
+		return fmt.Errorf("mouse wheel bind desktop: %w", err)
+	}
+	defer desktop.Close()
+
 	px, py := normalizedToScreen(x, y)
 	_, _, _ = procSetCursorPos.Call(uintptr(px), uintptr(py))
 
 	if deltaY != 0 {
 		if err := sendMouse(mouseEventFWheel, uint32(-deltaY)); err != nil {
-			return err
+			return fmt.Errorf("send vertical wheel desktop=%s: %w", desktop.Name(), err)
 		}
 	}
 
 	if deltaX != 0 {
 		if err := sendMouse(mouseEventFHWheel, uint32(deltaX)); err != nil {
-			return err
+			return fmt.Errorf("send horizontal wheel desktop=%s: %w", desktop.Name(), err)
 		}
 	}
 
@@ -212,6 +246,12 @@ func (i *Injector) Key(code string, down bool) error {
 		return nil
 	}
 
+	desktop, err := bindInputDesktop("keyboard")
+	if err != nil {
+		return fmt.Errorf("keyboard bind desktop: %w", err)
+	}
+	defer desktop.Close()
+
 	vk := vkFromBrowserCode(code)
 	if vk == 0 {
 		return nil
@@ -222,11 +262,20 @@ func (i *Injector) Key(code string, down bool) error {
 			return nil
 		}
 		i.downKeys[vk] = true
-		return sendKey(vk, false)
+
+		if err := sendKey(vk, false); err != nil {
+			return fmt.Errorf("send key down desktop=%s: %w", desktop.Name(), err)
+		}
+		return nil
 	}
 
 	delete(i.downKeys, vk)
-	return sendKey(vk, true)
+
+	if err := sendKey(vk, true); err != nil {
+		return fmt.Errorf("send key up desktop=%s: %w", desktop.Name(), err)
+	}
+
+	return nil
 }
 
 func (i *Injector) ReleaseAll() {
@@ -236,28 +285,49 @@ func (i *Injector) ReleaseAll() {
 }
 
 func (i *Injector) releaseAllLocked() {
+	desktop, err := bindInputDesktop("release-all-keys")
+	if err != nil {
+		logger.RDAgent.Warnf("release all bind desktop failed: %v", err)
+
+		for vk := range i.downKeys {
+			delete(i.downKeys, vk)
+		}
+		return
+	}
+	defer desktop.Close()
+
 	for vk := range i.downKeys {
-		_ = sendKey(vk, true)
+		if err := sendKey(vk, true); err != nil {
+			logger.RDAgent.Warnf(
+				"release key failed: vk=%d desktop=%s error=%v",
+				vk,
+				desktop.Name(),
+				err,
+			)
+		}
+
 		delete(i.downKeys, vk)
 	}
 }
 
 func normalizedToScreen(x, y float64) (int, int) {
-	w, _, _ := procGetSystemMetrics.Call(smCXScreen)
-	h, _, _ := procGetSystemMetrics.Call(smCYScreen)
+	vx, _, _ := procGetSystemMetrics.Call(smXVirtualScreen)
+	vy, _, _ := procGetSystemMetrics.Call(smYVirtualScreen)
+	vw, _, _ := procGetSystemMetrics.Call(smCXVirtualScreen)
+	vh, _, _ := procGetSystemMetrics.Call(smCYVirtualScreen)
 
-	if w == 0 {
-		w = 1
+	if vw == 0 {
+		vw = 1
 	}
-	if h == 0 {
-		h = 1
+	if vh == 0 {
+		vh = 1
 	}
 
 	x = math.Max(0, math.Min(1, x))
 	y = math.Max(0, math.Min(1, y))
 
-	px := int(math.Round(x * float64(int(w)-1)))
-	py := int(math.Round(y * float64(int(h)-1)))
+	px := int(vx) + int(math.Round(x*float64(int(vw)-1)))
+	py := int(vy) + int(math.Round(y*float64(int(vh)-1)))
 
 	return px, py
 }
