@@ -12,7 +12,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-const maxClipboardTextBytes = 60 * 2024
+const maxClipboardTextBytes = 60 * 1024
 
 type Sender interface {
 	SendText(s string) error

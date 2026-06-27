@@ -399,6 +399,11 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 	dc.OnOpen(func() {
 		logger.RDAgent.Infof("DataChannel opened: label=%s", label)
 
+		if label == "motion" {
+			logger.RDAgent.Info("Motion DataChannel ready")
+			return
+		}
+
 		if label == "control" {
 			if err := p.control.BindSender(dc); err != nil {
 				logger.RDAgent.Warnf("Clipboard watcher start failed: %v", err)
@@ -411,16 +416,22 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 	})
 
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		if label != "control" {
+		if label != "control" && label != "motion" {
 			return
 		}
+
 		if !msg.IsString {
-			logger.RDAgent.Warnf("Control DataChannel binary message ignored: bytes=%d", len(msg.Data))
+			logger.RDAgent.Warnf("DataChannel binary message ignored: label=%s bytes=%d", label, len(msg.Data))
+			return
+		}
+
+		if label == "motion" && len(msg.Data) > 512 {
+			logger.RDAgent.Warnf("Motion message too large ignored: bytes=%d", len(msg.Data))
 			return
 		}
 
 		if err := p.control.Handle(dc, msg.Data); err != nil {
-			logger.RDAgent.Warnf("Control message handling failed: %v", err)
+			logger.RDAgent.Warnf("DataChannel message handling failed: label=%s error=%v", label, err)
 		}
 	})
 
