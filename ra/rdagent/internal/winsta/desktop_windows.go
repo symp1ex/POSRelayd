@@ -72,7 +72,37 @@ func BindCurrentThreadToInputDesktop(reason string) (*BoundDesktop, error) {
 		runtime.UnlockOSThread()
 		return nil, fmt.Errorf("SetThreadDesktop name=%s failed: %w", name, setErr)
 	}
-	
+
+	return &BoundDesktop{
+		handle: hDesk,
+		name:   name,
+	}, nil
+}
+
+func RebindCurrentThreadToInputDesktop(reason string, previous *BoundDesktop) (*BoundDesktop, error) {
+	_ = reason
+
+	hDesk, _, err := procOpenInputDesktop.Call(
+		dfAllowOtherAccountHook,
+		0,
+		desktopAllAccess,
+	)
+	if hDesk == 0 {
+		return nil, fmt.Errorf("OpenInputDesktop failed: %w", err)
+	}
+
+	name := desktopName(hDesk)
+
+	ret, _, setErr := procSetThreadDesktop.Call(hDesk)
+	if ret == 0 {
+		procCloseDesktop.Call(hDesk)
+		return nil, fmt.Errorf("SetThreadDesktop name=%s failed: %w", name, setErr)
+	}
+
+	if previous != nil {
+		previous.CloseHandleOnly()
+	}
+
 	return &BoundDesktop{
 		handle: hDesk,
 		name:   name,
@@ -84,12 +114,22 @@ func (d *BoundDesktop) Close() {
 		return
 	}
 
+	d.CloseHandleOnly()
+
+	runtime.UnlockOSThread()
+}
+
+// CloseHandleOnly закрывает HDESK, но не делает runtime.UnlockOSThread.
+// Нужен для rebind внутри уже pinned worker-thread.
+func (d *BoundDesktop) CloseHandleOnly() {
+	if d == nil {
+		return
+	}
+
 	if d.handle != 0 {
 		procCloseDesktop.Call(d.handle)
 		d.handle = 0
 	}
-
-	runtime.UnlockOSThread()
 }
 
 func (d *BoundDesktop) Name() string {

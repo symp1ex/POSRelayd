@@ -231,7 +231,7 @@ func (h *Handler) Handle(dc *webrtc.DataChannel, raw []byte) error {
 
 func (h *Handler) ReleaseAll() {
 	h.UnbindSender()
-	h.injector.ReleaseAll()
+	h.injector.Close()
 }
 
 func sendJSON(dc *webrtc.DataChannel, msg Message) error {
