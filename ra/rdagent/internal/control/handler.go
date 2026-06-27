@@ -3,16 +3,16 @@ package control
 import (
 	"encoding/json"
 	"fmt"
+	"rdagent/internal/logger"
+	"rdagent/internal/winsta"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/pion/webrtc/v4"
-
-	"rdagent/internal/logger"
 )
 
-const maxClipboardTextBytes = 60 * 1024
+const maxClipboardTextBytes = 60 * 2024
 
 type Sender interface {
 	SendText(s string) error
@@ -39,11 +39,13 @@ func NewHandler(sessionID string) *Handler {
 		injector:  NewInjector(),
 		clipboard: NewClipboard(),
 	}
+
 	h.watcher = NewClipboardWatcher(func() {
-		if err := h.sendClipboardIfChanged(); err != nil {
+		if err := h.sendClipboardIfUserChanged(); err != nil {
 			logger.RDAgent.Warnf("Clipboard watcher send failed: %v", err)
 		}
 	})
+
 	return h
 }
 
@@ -63,6 +65,7 @@ func (h *Handler) BindSender(sender Sender) error {
 	if h.watcher != nil {
 		return h.watcher.Start()
 	}
+
 	return nil
 }
 
@@ -79,60 +82,11 @@ func (h *Handler) UnbindSender() {
 func (h *Handler) currentSender() Sender {
 	h.senderMu.RLock()
 	defer h.senderMu.RUnlock()
+
 	return h.sender
 }
 
-func (h *Handler) sendClipboardIfChanged() error {
-	sender := h.currentSender()
-	if sender == nil {
-		return nil
-	}
-
-	text, revision, changed, err := h.clipboard.GetTextIfChanged()
-	if err != nil {
-		return err
-	}
-	if !changed {
-		return nil
-	}
-
-	logger.RDAgent.Infof(
-		"Clipboard changed on host: revision=%s bytes=%d",
-		revision,
-		len([]byte(text)),
-	)
-
-	text, err = sanitizeClipboardText(text)
-	if err != nil {
-		return err
-	}
-
-	seq := h.seq.Add(1)
-
-	raw, err := json.Marshal(Message{
-		Type:      "clipboard_sync",
-		ID:        fmt.Sprintf("agent-%d", seq),
-		SessionID: h.sessionID,
-		Origin:    h.origin,
-		Seq:       seq,
-		Revision:  revision,
-		Text:      text,
-	})
-	if err != nil {
-		return err
-	}
-
-	logger.RDAgent.Infof(
-		"Sending clipboard_sync to viewer: seq=%d revision=%s bytes=%d",
-		seq,
-		revision,
-		len([]byte(text)),
-	)
-
-	return sender.SendText(string(raw))
-}
-
-func (h *Handler) sendClipboardSnapshot(sender Sender) error {
+func (h *Handler) sendRemoteClipboardToViewer(dc *webrtc.DataChannel, reason string) error {
 	text, revision, err := h.clipboard.GetText()
 	if err != nil {
 		return err
@@ -145,6 +99,48 @@ func (h *Handler) sendClipboardSnapshot(sender Sender) error {
 
 	seq := h.seq.Add(1)
 
+	return sendJSON(dc, Message{
+		Type:      "clipboard_sync",
+		ID:        fmt.Sprintf("agent-%d", seq),
+		SessionID: h.sessionID,
+		Origin:    h.origin,
+		Seq:       seq,
+		Revision:  revision,
+		Text:      text,
+		Reason:    reason,
+	})
+}
+
+func (h *Handler) sendClipboardIfUserChanged() error {
+	if !h.injector.IsFocused() {
+		return nil
+	}
+
+	desktopName, err := winsta.CurrentInputDesktopName()
+	if err != nil || desktopName == "" || desktopName == "unknown" {
+		return nil
+	}
+
+	sender := h.currentSender()
+	if sender == nil {
+		return nil
+	}
+
+	text, revision, changed, err := h.clipboard.GetTextIfUserChanged()
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+
+	text, err = sanitizeClipboardText(text)
+	if err != nil {
+		return err
+	}
+
+	seq := h.seq.Add(1)
+
 	raw, err := json.Marshal(Message{
 		Type:      "clipboard_sync",
 		ID:        fmt.Sprintf("agent-%d", seq),
@@ -153,16 +149,21 @@ func (h *Handler) sendClipboardSnapshot(sender Sender) error {
 		Seq:       seq,
 		Revision:  revision,
 		Text:      text,
+		Reason:    "remote-clipboard-update",
 	})
 	if err != nil {
 		return err
 	}
 
-	return sender.SendText(string(raw))
-}
+	logger.RDAgent.Infof(
+		"Remote clipboard changed by user: desktop=%s seq=%d revision=%s bytes=%d",
+		desktopName,
+		seq,
+		revision,
+		len([]byte(text)),
+	)
 
-func (h *Handler) SendClipboardSnapshot(sender Sender) error {
-	return h.sendClipboardSnapshot(sender)
+	return sender.SendText(string(raw))
 }
 
 func (h *Handler) Handle(dc *webrtc.DataChannel, raw []byte) error {
@@ -194,7 +195,7 @@ func (h *Handler) Handle(dc *webrtc.DataChannel, raw []byte) error {
 	case "key_up":
 		return h.injector.Key(msg.Code, false)
 
-	case "clipboard_set", "clipboard_sync":
+	case "clipboard_set":
 		text, err := sanitizeClipboardText(msg.Text)
 		if err != nil {
 			return err
@@ -204,10 +205,16 @@ func (h *Handler) Handle(dc *webrtc.DataChannel, raw []byte) error {
 		if err != nil {
 			return err
 		}
+
+		return nil
+
+	case "clipboard_sync":
+		// Не принимаем clipboard_sync от viewer как команду.
+		// Viewer -> Agent должен использовать только clipboard_set.
 		return nil
 
 	case "clipboard_get":
-		return h.sendClipboardSnapshot(dc)
+		return h.sendRemoteClipboardToViewer(dc, msg.Reason)
 
 	case "ping":
 		return sendJSON(dc, Message{
@@ -223,26 +230,8 @@ func (h *Handler) Handle(dc *webrtc.DataChannel, raw []byte) error {
 }
 
 func (h *Handler) ReleaseAll() {
+	h.UnbindSender()
 	h.injector.ReleaseAll()
-}
-
-func (h *Handler) sendClipboardSync(dc *webrtc.DataChannel) error {
-	text, revision, err := h.clipboard.GetText()
-	if err != nil {
-		return err
-	}
-
-	seq := h.seq.Add(1)
-
-	return sendJSON(dc, Message{
-		Type:      "clipboard_sync",
-		ID:        fmt.Sprintf("agent-%d", seq),
-		SessionID: h.sessionID,
-		Origin:    h.origin,
-		Seq:       seq,
-		Revision:  revision,
-		Text:      text,
-	})
 }
 
 func sendJSON(dc *webrtc.DataChannel, msg Message) error {

@@ -38,6 +38,16 @@ const (
 	gmemMoveable  = 0x0002
 )
 
+type Clipboard struct {
+	mu           sync.Mutex
+	lastRevision string
+	lastOrigin   string
+	lastSeq      uint64
+
+	lastHostSetRevision string
+	suppressUntil       time.Time
+}
+
 func createClipboardOwnerWindow() (uintptr, error) {
 	className, err := syscall.UTF16PtrFromString("STATIC")
 	if err != nil {
@@ -86,13 +96,6 @@ func openClipboardWithRetry(owner uintptr) error {
 	return fmt.Errorf("OpenClipboard failed after retries: %w", lastErr)
 }
 
-type Clipboard struct {
-	mu           sync.Mutex
-	lastRevision string
-	lastOrigin   string
-	lastSeq      uint64
-}
-
 func NewClipboard() *Clipboard {
 	return &Clipboard{}
 }
@@ -122,6 +125,8 @@ func (c *Clipboard) SetText(text, origin string, seq uint64, revision string) (b
 	c.lastRevision = revision
 	c.lastOrigin = origin
 	c.lastSeq = seq
+	c.lastHostSetRevision = revision
+	c.suppressUntil = time.Now().Add(350 * time.Millisecond)
 
 	return true, nil
 }
@@ -153,6 +158,38 @@ func (c *Clipboard) GetTextIfChanged() (string, string, bool, error) {
 	defer c.mu.Unlock()
 
 	if c.lastRevision == revision {
+		return "", revision, false, nil
+	}
+
+	c.lastRevision = revision
+	c.lastOrigin = ""
+	c.lastSeq = 0
+
+	return text, revision, true, nil
+}
+
+func (c *Clipboard) GetTextIfUserChanged() (string, string, bool, error) {
+	text, err := getClipboardText()
+	if err != nil {
+		return "", "", false, err
+	}
+
+	revision := Revision(text)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.lastRevision == revision {
+		return "", revision, false, nil
+	}
+
+	if c.lastHostSetRevision == revision {
+		c.lastRevision = revision
+		return "", revision, false, nil
+	}
+
+	if time.Now().Before(c.suppressUntil) {
+		c.lastRevision = revision
 		return "", revision, false, nil
 	}
 

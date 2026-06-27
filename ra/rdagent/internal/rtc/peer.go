@@ -397,7 +397,7 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 	logger.RDAgent.Infof("DataChannel discovered: label=%s origin=%s", label, origin)
 
 	dc.OnOpen(func() {
-		logger.RDAgent.Infof("DataChannel open: label=%s", label)
+		logger.RDAgent.Infof("DataChannel opened: label=%s", label)
 
 		if label == "control" {
 			if err := p.control.BindSender(dc); err != nil {
@@ -406,10 +406,6 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 
 			if err := dc.SendText(`{"type":"rd_agent_ready"}`); err != nil {
 				logger.RDAgent.Warnf("DataChannel initial send failed: %v", err)
-			}
-
-			if err := p.control.SendClipboardSnapshot(dc); err != nil {
-				logger.RDAgent.Warnf("Initial clipboard snapshot send failed: %v", err)
 			}
 		}
 	})

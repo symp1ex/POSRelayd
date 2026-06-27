@@ -131,6 +131,13 @@ func (i *Injector) SetFocus(focused bool) {
 	}
 }
 
+func (i *Injector) IsFocused() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	return i.focused
+}
+
 func (i *Injector) MouseMoveNormalized(x, y float64) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()

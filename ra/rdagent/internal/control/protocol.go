@@ -24,6 +24,7 @@ type Message struct {
 	Origin   string `json:"origin,omitempty"`
 	Seq      uint64 `json:"seq,omitempty"`
 	Revision string `json:"revision,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 
 	Focused bool `json:"focused,omitempty"`
 }
