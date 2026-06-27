@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 
@@ -29,6 +30,9 @@ type Peer struct {
 	iceServers []webrtc.ICEServer
 	seenRemote map[string]struct{}
 
+	pendingRemoteICE       []webrtc.ICECandidateInit
+	disconnectedCloseTimer *time.Timer
+
 	control *control.Handler
 }
 
@@ -47,11 +51,18 @@ func (p *Peer) HandleOffer(sdp string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.disconnectedCloseTimer != nil {
+		p.disconnectedCloseTimer.Stop()
+		p.disconnectedCloseTimer = nil
+	}
+
 	if p.pc != nil {
 		logger.RDAgent.Warn("Existing PeerConnection will be closed before applying new offer")
 		_ = p.pc.Close()
 		p.pc = nil
 	}
+
+	p.seenRemote = make(map[string]struct{})
 
 	pc, err := p.newPeerConnectionLocked()
 	if err != nil {
@@ -65,6 +76,19 @@ func (p *Peer) HandleOffer(sdp string) error {
 
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		return fmt.Errorf("set remote offer: %w", err)
+	}
+
+	if len(p.pendingRemoteICE) > 0 {
+		pending := p.pendingRemoteICE
+		p.pendingRemoteICE = nil
+
+		logger.RDAgent.Infof("Applying queued remote ICE candidates: count=%d", len(pending))
+
+		for _, init := range pending {
+			if err := p.addRemoteICELocked(init); err != nil {
+				return fmt.Errorf("add queued remote ice: %w", err)
+			}
+		}
 	}
 
 	answer, err := pc.CreateAnswer(nil)
@@ -104,25 +128,53 @@ func (p *Peer) AddRemoteICE(candidate any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.pc == nil {
-		logger.RDAgent.Warn("Remote ICE ignored: PeerConnection is not created yet")
-		return nil
-	}
-
-	raw, err := json.Marshal(candidate)
+	init, err := parseICECandidate(candidate)
 	if err != nil {
-		return fmt.Errorf("marshal ice candidate: %w", err)
-	}
-
-	var init webrtc.ICECandidateInit
-	if err := json.Unmarshal(raw, &init); err != nil {
-		return fmt.Errorf("unmarshal ice candidate: %w", err)
+		return err
 	}
 
 	if init.Candidate == "" {
 		logger.RDAgent.Debug("Empty ICE candidate ignored")
 		return nil
 	}
+
+	if p.pc == nil {
+		p.pendingRemoteICE = append(p.pendingRemoteICE, init)
+		logger.RDAgent.Warnf(
+			"Remote ICE queued: PeerConnection is not created yet pending=%d",
+			len(p.pendingRemoteICE),
+		)
+		return nil
+	}
+
+	return p.addRemoteICELocked(init)
+}
+
+func parseICECandidate(candidate any) (webrtc.ICECandidateInit, error) {
+	raw, err := json.Marshal(candidate)
+	if err != nil {
+		return webrtc.ICECandidateInit{}, fmt.Errorf("marshal ice candidate: %w", err)
+	}
+
+	var init webrtc.ICECandidateInit
+	if err := json.Unmarshal(raw, &init); err != nil {
+		return webrtc.ICECandidateInit{}, fmt.Errorf("unmarshal ice candidate: %w", err)
+	}
+
+	return init, nil
+}
+
+func (p *Peer) addRemoteICELocked(init webrtc.ICECandidateInit) error {
+	if init.Candidate == "" {
+		return nil
+	}
+
+	key := fmt.Sprintf("%s|%s|%d", init.Candidate, init.SDPMid, init.SDPMLineIndex)
+	if _, ok := p.seenRemote[key]; ok {
+		logger.RDAgent.Debug("Duplicate remote ICE candidate ignored")
+		return nil
+	}
+	p.seenRemote[key] = struct{}{}
 
 	if err := p.pc.AddICECandidate(init); err != nil {
 		return fmt.Errorf("add ice candidate: %w", err)
@@ -135,6 +187,14 @@ func (p *Peer) AddRemoteICE(candidate any) error {
 func (p *Peer) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.disconnectedCloseTimer != nil {
+		p.disconnectedCloseTimer.Stop()
+		p.disconnectedCloseTimer = nil
+	}
+
+	p.pendingRemoteICE = nil
+	p.seenRemote = make(map[string]struct{})
 
 	if p.control != nil {
 		p.control.ReleaseAll()
@@ -196,15 +256,30 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 			return
 		}
 
-		logger.RDAgent.Debug("Local ICE candidate sent")
+		logger.RDAgent.Debugf(
+			"Local ICE candidate sent: sdpMid=%s sdpMLineIndex=%v candidate=%s",
+			init.SDPMid,
+			init.SDPMLineIndex,
+			init.Candidate,
+		)
 	})
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		logger.RDAgent.Infof("PeerConnection state: %s", state.String())
 
 		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			p.mu.Lock()
+			if p.disconnectedCloseTimer != nil {
+				p.disconnectedCloseTimer.Stop()
+				p.disconnectedCloseTimer = nil
+			}
+			p.mu.Unlock()
+
+		case webrtc.PeerConnectionStateDisconnected:
+			p.scheduleDisconnectedClose(pc, 15*time.Second)
+
 		case webrtc.PeerConnectionStateFailed,
-			webrtc.PeerConnectionStateDisconnected,
 			webrtc.PeerConnectionStateClosed:
 			_ = p.sender.Send(protocol.Message{
 				Type:      protocol.MessageRDClosed,
@@ -266,6 +341,54 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 
 	logger.RDAgent.Info("PeerConnection with desktop video track created")
 	return pc, nil
+}
+
+func (p *Peer) scheduleDisconnectedClose(pc *webrtc.PeerConnection, delay time.Duration) {
+	p.mu.Lock()
+
+	if p.disconnectedCloseTimer != nil {
+		p.disconnectedCloseTimer.Stop()
+	}
+
+	p.disconnectedCloseTimer = time.AfterFunc(delay, func() {
+		p.mu.Lock()
+		currentPC := p.pc
+		p.mu.Unlock()
+
+		if currentPC != pc {
+			return
+		}
+
+		state := pc.ConnectionState()
+		if state != webrtc.PeerConnectionStateDisconnected {
+			logger.RDAgent.Infof(
+				"PeerConnection disconnected close skipped: current_state=%s",
+				state.String(),
+			)
+			return
+		}
+
+		logger.RDAgent.Warnf(
+			"PeerConnection stayed disconnected for %s, closing RD channel",
+			delay,
+		)
+
+		_ = p.sender.Send(protocol.Message{
+			Type:      protocol.MessageRDClosed,
+			ID:        p.sessionID,
+			SessionID: p.sessionID,
+			ClientID:  p.clientID,
+			Target:    protocol.RDTargetAdmin,
+			Error:     "PeerConnection state: disconnected timeout",
+		})
+	})
+
+	p.mu.Unlock()
+
+	logger.RDAgent.Warnf(
+		"PeerConnection disconnected; waiting %s before closing",
+		delay,
+	)
 }
 
 func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
