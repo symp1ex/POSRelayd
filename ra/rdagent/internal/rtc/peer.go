@@ -421,17 +421,24 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 		}
 
 		if !msg.IsString {
-			logger.RDAgent.Warnf("DataChannel binary message ignored: label=%s bytes=%d", label, len(msg.Data))
+			if len(msg.Data) > 32 {
+				logger.RDAgent.Warnf("Binary input message too large ignored: label=%s bytes=%d", label, len(msg.Data))
+				return
+			}
+
+			if err := p.control.HandleBinary(msg.Data); err != nil {
+				logger.RDAgent.Warnf("Binary input handling failed: label=%s bytes=%d error=%v", label, len(msg.Data), err)
+			}
 			return
 		}
 
 		if label == "motion" && len(msg.Data) > 512 {
-			logger.RDAgent.Warnf("Motion message too large ignored: bytes=%d", len(msg.Data))
+			logger.RDAgent.Warnf("Motion JSON message too large ignored: bytes=%d", len(msg.Data))
 			return
 		}
 
 		if err := p.control.Handle(dc, msg.Data); err != nil {
-			logger.RDAgent.Warnf("DataChannel message handling failed: label=%s error=%v", label, err)
+			logger.RDAgent.Warnf("DataChannel JSON message handling failed: label=%s error=%v", label, err)
 		}
 	})
 
@@ -439,7 +446,6 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 		logger.RDAgent.Infof("DataChannel closed: label=%s", label)
 
 		if label == "control" {
-			p.control.UnbindSender()
 			p.control.ReleaseAll()
 		}
 	})
@@ -448,7 +454,6 @@ func (p *Peer) configureDataChannel(dc *webrtc.DataChannel, origin string) {
 		logger.RDAgent.Errorf("DataChannel error label=%s: %v", label, err)
 
 		if label == "control" {
-			p.control.UnbindSender()
 			p.control.ReleaseAll()
 		}
 	})

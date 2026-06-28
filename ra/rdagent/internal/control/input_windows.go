@@ -91,7 +91,8 @@ type inputRequest struct {
 	deltaX int32
 	deltaY int32
 
-	code string
+	code string // оставляем для backward-compatible JSON, но hot path использует vk
+	vk   uint16
 
 	keys []uint16
 
@@ -102,6 +103,50 @@ type inputWorker struct {
 	req  chan inputRequest
 	stop chan struct{}
 	done chan struct{}
+}
+
+func completeInputRequest(req inputRequest, err error) {
+	if req.reply != nil {
+		req.reply <- err
+		return
+	}
+
+	if err != nil {
+		logger.RDAgent.Warnf("async input request failed: op=%d error=%v", req.op, err)
+	}
+}
+
+type virtualScreenGeometry struct {
+	left   int
+	top    int
+	width  int
+	height int
+	valid  bool
+}
+
+type cursorCache struct {
+	x     int
+	y     int
+	valid bool
+}
+
+var inputCache = struct {
+	mu     sync.Mutex
+	geom   virtualScreenGeometry
+	cursor cursorCache
+}{}
+
+var getSystemMetrics = func(index int) int {
+	ret, _, _ := procGetSystemMetrics.Call(uintptr(index))
+	return int(ret)
+}
+
+var setCursorPos = func(x, y int) error {
+	ret, _, err := procSetCursorPos.Call(uintptr(x), uintptr(y))
+	if ret == 0 {
+		return err
+	}
+	return nil
 }
 
 func newInputWorker() *inputWorker {
@@ -177,7 +222,7 @@ func (w *inputWorker) run() {
 			if desktop == nil {
 				newDesktop, err := bindInputDesktop("input-worker-lazy-bind")
 				if err != nil {
-					req.reply <- fmt.Errorf("input worker bind desktop: %w", err)
+					completeInputRequest(req, fmt.Errorf("input worker bind desktop: %w", err))
 					continue
 				}
 				desktop = newDesktop
@@ -188,7 +233,7 @@ func (w *inputWorker) run() {
 			if err != nil {
 				newDesktop, bindErr := winsta.RebindCurrentThreadToInputDesktop("input-worker-error-rebind", desktop)
 				if bindErr != nil {
-					req.reply <- fmt.Errorf("%w; rebind failed: %v", err, bindErr)
+					completeInputRequest(req, fmt.Errorf("%w; rebind failed: %v", err, bindErr))
 					continue
 				}
 
@@ -201,11 +246,11 @@ func (w *inputWorker) run() {
 
 				desktop = newDesktop
 
-				// Один retry после rebind. Если он тоже упадет — вызывающий код уйдет в fallback.
+				// Один retry после rebind. Для sync-запросов ошибка вернется вызывающему коду,
+				// для async mouse_move будет только залогирована.
 				err = w.handleRequest(desktop, req)
 			}
-
-			req.reply <- err
+			completeInputRequest(req, err)
 		}
 	}
 }
@@ -222,6 +267,9 @@ func (w *inputWorker) handleRequest(desktop *winsta.BoundDesktop, req inputReque
 		return mouseWheelOnBoundDesktop(desktop, req.x, req.y, req.deltaX, req.deltaY)
 
 	case inputOpKey:
+		if req.vk != 0 {
+			return keyVKOnBoundDesktop(desktop, req.vk, req.down)
+		}
 		return keyOnBoundDesktop(desktop, req.code, req.down)
 
 	case inputOpReleaseKeys:
@@ -256,6 +304,19 @@ func (w *inputWorker) call(req inputRequest) error {
 		return err
 	case <-w.done:
 		return fmt.Errorf("input worker stopped before reply")
+	}
+}
+
+func (w *inputWorker) tryPost(req inputRequest) bool {
+	req.reply = nil
+
+	select {
+	case w.req <- req:
+		return true
+	case <-w.done:
+		return false
+	default:
+		return false
 	}
 }
 
@@ -337,8 +398,15 @@ func (i *Injector) SetFocus(focused bool) {
 
 	i.focused = focused
 	if !focused {
+		invalidateCursorCache()
 		i.releaseAllLocked()
 	}
+}
+
+func invalidateCursorCache() {
+	inputCache.mu.Lock()
+	inputCache.cursor.valid = false
+	inputCache.mu.Unlock()
 }
 
 func (i *Injector) IsFocused() bool {
@@ -357,17 +425,13 @@ func (i *Injector) MouseMoveNormalized(x, y float64) error {
 		return nil
 	}
 
-	err := i.worker.call(inputRequest{
+	_ = i.worker.tryPost(inputRequest{
 		op: inputOpMouseMove,
 		x:  x,
 		y:  y,
 	})
-	if err == nil {
-		return nil
-	}
 
-	logger.RDAgent.Warnf("input worker mouse move failed, using fallback: %v", err)
-	return i.mouseMoveFallback(x, y)
+	return nil
 }
 
 func (i *Injector) mouseMoveFallback(x, y float64) error {
@@ -454,6 +518,14 @@ func (i *Injector) Key(code string, down bool) error {
 		return nil
 	}
 
+	return i.KeyVK(vk, down)
+}
+
+func (i *Injector) KeyVK(vk uint16, down bool) error {
+	if vk == 0 {
+		return nil
+	}
+
 	i.mu.Lock()
 	if !i.focused {
 		i.mu.Unlock()
@@ -473,7 +545,7 @@ func (i *Injector) Key(code string, down bool) error {
 
 	err := i.worker.call(inputRequest{
 		op:   inputOpKey,
-		code: code,
+		vk:   vk,
 		down: down,
 	})
 	if err == nil {
@@ -481,7 +553,17 @@ func (i *Injector) Key(code string, down bool) error {
 	}
 
 	logger.RDAgent.Warnf("input worker key failed, using fallback: %v", err)
-	return i.keyFallback(code, down)
+	return i.keyVKFallback(vk, down)
+}
+
+func (i *Injector) keyVKFallback(vk uint16, down bool) error {
+	desktop, err := bindInputDesktop("keyboard-fallback")
+	if err != nil {
+		return fmt.Errorf("keyboard fallback bind desktop: %w", err)
+	}
+	defer desktop.Close()
+
+	return keyVKOnBoundDesktop(desktop, vk, down)
 }
 
 func (i *Injector) keyFallback(code string, down bool) error {
@@ -547,24 +629,49 @@ func (i *Injector) releaseAllLocked() {
 	}
 }
 
-func normalizedToScreen(x, y float64) (int, int) {
-	vx, _, _ := procGetSystemMetrics.Call(smXVirtualScreen)
-	vy, _, _ := procGetSystemMetrics.Call(smYVirtualScreen)
-	vw, _, _ := procGetSystemMetrics.Call(smCXVirtualScreen)
-	vh, _, _ := procGetSystemMetrics.Call(smCYVirtualScreen)
+func refreshVirtualScreenGeometryLocked() {
+	width := getSystemMetrics(smCXVirtualScreen)
+	height := getSystemMetrics(smCYVirtualScreen)
 
-	if vw == 0 {
-		vw = 1
+	if width <= 0 {
+		width = 1
 	}
-	if vh == 0 {
-		vh = 1
+	if height <= 0 {
+		height = 1
+	}
+
+	inputCache.geom = virtualScreenGeometry{
+		left:   getSystemMetrics(smXVirtualScreen),
+		top:    getSystemMetrics(smYVirtualScreen),
+		width:  width,
+		height: height,
+		valid:  true,
+	}
+}
+
+func RefreshInputGeometry() {
+	inputCache.mu.Lock()
+	defer inputCache.mu.Unlock()
+
+	refreshVirtualScreenGeometryLocked()
+	inputCache.cursor.valid = false
+}
+
+func normalizedToScreen(x, y float64) (int, int) {
+	inputCache.mu.Lock()
+	defer inputCache.mu.Unlock()
+
+	if !inputCache.geom.valid {
+		refreshVirtualScreenGeometryLocked()
 	}
 
 	x = math.Max(0, math.Min(1, x))
 	y = math.Max(0, math.Min(1, y))
 
-	px := int(vx) + int(math.Round(x*float64(int(vw)-1)))
-	py := int(vy) + int(math.Round(y*float64(int(vh)-1)))
+	g := inputCache.geom
+
+	px := g.left + int(math.Round(x*float64(g.width-1)))
+	py := g.top + int(math.Round(y*float64(g.height-1)))
 
 	return px, py
 }
@@ -572,13 +679,24 @@ func normalizedToScreen(x, y float64) (int, int) {
 func mouseMoveOnBoundDesktop(desktop *winsta.BoundDesktop, x, y float64) error {
 	px, py := normalizedToScreen(x, y)
 
-	ret, _, err := procSetCursorPos.Call(
-		uintptr(px),
-		uintptr(py),
-	)
-	if ret == 0 {
+	inputCache.mu.Lock()
+	if inputCache.cursor.valid && inputCache.cursor.x == px && inputCache.cursor.y == py {
+		inputCache.mu.Unlock()
+		return nil
+	}
+	inputCache.mu.Unlock()
+
+	if err := setCursorPos(px, py); err != nil {
 		return fmt.Errorf("SetCursorPos desktop=%s failed: %w", desktop.Name(), err)
 	}
+
+	inputCache.mu.Lock()
+	inputCache.cursor = cursorCache{
+		x:     px,
+		y:     py,
+		valid: true,
+	}
+	inputCache.mu.Unlock()
 
 	return nil
 }
@@ -641,6 +759,14 @@ func mouseWheelOnBoundDesktop(desktop *winsta.BoundDesktop, x, y float64, deltaX
 
 func keyOnBoundDesktop(desktop *winsta.BoundDesktop, code string, down bool) error {
 	vk := vkFromBrowserCode(code)
+	if vk == 0 {
+		return nil
+	}
+
+	return keyVKOnBoundDesktop(desktop, vk, down)
+}
+
+func keyVKOnBoundDesktop(desktop *winsta.BoundDesktop, vk uint16, down bool) error {
 	if vk == 0 {
 		return nil
 	}

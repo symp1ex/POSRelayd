@@ -22,9 +22,10 @@ type Handler struct {
 	sessionID string
 	origin    string
 
-	injector  *Injector
-	clipboard *Clipboard
-	watcher   *ClipboardWatcher
+	injector       *Injector
+	clipboard      *Clipboard
+	watcher        *ClipboardWatcher
+	displayWatcher *DisplayWatcher
 
 	seq atomic.Uint64
 
@@ -46,6 +47,13 @@ func NewHandler(sessionID string) *Handler {
 		}
 	})
 
+	h.displayWatcher = NewDisplayWatcher(func() {
+		logger.RDAgent.Info("Display configuration changed; refreshing input geometry cache")
+		RefreshInputGeometry()
+	})
+
+	RefreshInputGeometry()
+
 	return h
 }
 
@@ -62,6 +70,12 @@ func (h *Handler) BindSender(sender Sender) error {
 	h.sender = sender
 	h.senderMu.Unlock()
 
+	if h.displayWatcher != nil {
+		if err := h.displayWatcher.Start(); err != nil {
+			return err
+		}
+	}
+
 	if h.watcher != nil {
 		return h.watcher.Start()
 	}
@@ -73,6 +87,12 @@ func (h *Handler) UnbindSender() {
 	if h.watcher != nil {
 		h.watcher.Stop()
 	}
+
+	if h.displayWatcher != nil {
+		h.displayWatcher.Stop()
+	}
+
+	invalidateCursorCache()
 
 	h.senderMu.Lock()
 	h.sender = nil
@@ -166,6 +186,36 @@ func (h *Handler) sendClipboardIfUserChanged() error {
 	return sender.SendText(string(raw))
 }
 
+func (h *Handler) HandleBinary(raw []byte) error {
+	msg, err := DecodeBinaryInput(raw)
+	if err != nil {
+		return err
+	}
+
+	switch msg.Kind {
+	case BinaryInputMouseMove:
+		return h.injector.MouseMoveNormalized(msg.X, msg.Y)
+
+	case BinaryInputMouseDown:
+		return h.injector.MouseButton(msg.X, msg.Y, msg.Button, true)
+
+	case BinaryInputMouseUp:
+		return h.injector.MouseButton(msg.X, msg.Y, msg.Button, false)
+
+	case BinaryInputWheel:
+		return h.injector.MouseWheel(msg.X, msg.Y, msg.DeltaX, msg.DeltaY)
+
+	case BinaryInputKeyDown:
+		return h.injector.KeyVK(msg.VK, true)
+
+	case BinaryInputKeyUp:
+		return h.injector.KeyVK(msg.VK, false)
+
+	default:
+		return nil
+	}
+}
+
 func (h *Handler) Handle(dc *webrtc.DataChannel, raw []byte) error {
 	var msg Message
 	if err := json.Unmarshal(raw, &msg); err != nil {
@@ -177,6 +227,8 @@ func (h *Handler) Handle(dc *webrtc.DataChannel, raw []byte) error {
 		h.injector.SetFocus(msg.Focused)
 		return nil
 
+	// Backward compatibility:
+	// старые viewer-сборки всё ещё могут слать input через JSON.
 	case "mouse_move":
 		return h.injector.MouseMoveNormalized(msg.X, msg.Y)
 
@@ -209,8 +261,6 @@ func (h *Handler) Handle(dc *webrtc.DataChannel, raw []byte) error {
 		return nil
 
 	case "clipboard_sync":
-		// Не принимаем clipboard_sync от viewer как команду.
-		// Viewer -> Agent должен использовать только clipboard_set.
 		return nil
 
 	case "clipboard_get":
