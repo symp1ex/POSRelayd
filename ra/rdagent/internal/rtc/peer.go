@@ -348,6 +348,8 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 
 func videoMimeType(codec string) string {
 	switch codec {
+	case "h264":
+		return webrtc.MimeTypeH264
 	case "av1":
 		return webrtc.MimeTypeAV1
 	case "vp8":

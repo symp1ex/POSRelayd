@@ -57,9 +57,13 @@ func Parse(args []string) (Config, error) {
 	fs.IntVar(&cfg.LogRetainDays, "log-retain-days", 14, "How many days rotated logs are retained")
 
 	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure-skip-verify", false, "Disable TLS certificate verification for wss")
-
-	fs.StringVar(&cfg.VideoCodec, "video-codec", "vp8", "Video codec: vp8 or av1")
-	fs.StringVar(&cfg.VideoEncoder, "video-encoder", "libvpx", "Video encoder: libvpx or av1_mf")
+	//
+	//fs.StringVar(&cfg.VideoCodec, "video-codec", "vp8", "Video codec: vp8 or av1")
+	//fs.StringVar(&cfg.VideoEncoder, "video-encoder", "libvpx", "Video encoder: libvpx or av1_mf")
+	//fs.StringVar(&cfg.VideoCodec, "video-codec", "av1", "Video codec: vp8 or av1")
+	//fs.StringVar(&cfg.VideoEncoder, "video-encoder", "av1_mf", "Video encoder: libvpx or av1_mf")
+	fs.StringVar(&cfg.VideoCodec, "video-codec", "h264", "Video codec: vp8, h264 or av1")
+	fs.StringVar(&cfg.VideoEncoder, "video-encoder", "h264_mf", "Video encoder: libvpx, h264_mf or av1_mf")
 	fs.BoolVar(&cfg.ForceKeyframeOnPLI, "force-keyframe-on-pli", true, "Force fast keyframe recovery on RTCP PLI/FIR")
 	fs.IntVar(&cfg.PLIKeyframeCooldownMs, "pli-keyframe-cooldown-ms", 750, "Minimum interval between forced keyframe recoveries")
 	fs.StringVar(&cfg.MFScenario, "mf-scenario", "display_remoting", "MediaFoundation encoder scenario")
@@ -137,19 +141,23 @@ func (c Config) Validate() error {
 	}
 
 	switch c.VideoCodec {
-	case "vp8", "av1":
+	case "vp8", "h264", "av1":
 	default:
-		return fmt.Errorf("--video-codec must be one of: vp8, av1")
+		return fmt.Errorf("--video-codec must be one of: vp8, h264, av1")
 	}
 
 	switch c.VideoEncoder {
-	case "libvpx", "av1_mf":
+	case "libvpx", "h264_mf", "av1_mf":
 	default:
-		return fmt.Errorf("--video-encoder must be one of: libvpx, av1_mf")
+		return fmt.Errorf("--video-encoder must be one of: libvpx, h264_mf, av1_mf")
 	}
 
 	if c.VideoCodec == "vp8" && c.VideoEncoder != "libvpx" {
 		return fmt.Errorf("--video-codec=vp8 requires --video-encoder=libvpx")
+	}
+
+	if c.VideoCodec == "h264" && c.VideoEncoder != "h264_mf" {
+		return fmt.Errorf("--video-codec=h264 requires --video-encoder=h264_mf")
 	}
 
 	if c.VideoCodec == "av1" && c.VideoEncoder != "av1_mf" {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"github.com/pion/webrtc/v4/pkg/media/h264reader"
 	"io"
 	"os"
 	"path/filepath"
@@ -127,6 +128,11 @@ func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *w
 		keyframeReqCh: make(chan string, 1),
 	}, nil
 }
+
+//func initialProfileForGeometry(g Geometry) Profile {
+//	// TEST ONLY: fixed profile.
+//	return lowProfile24()
+//}
 
 func initialProfileForGeometry(g Geometry) Profile {
 	pixels := g.Width * g.Height
@@ -290,6 +296,8 @@ func monitorGeometry(monitor uintptr) (Geometry, bool) {
 }
 func (s *Stream) ffmpegArgs() []string {
 	switch s.cfg.VideoEncoder {
+	case "h264_mf":
+		return s.ffmpegArgsH264MF()
 	case "av1_mf":
 		return s.ffmpegArgsAV1MF()
 	case "libvpx":
@@ -299,21 +307,48 @@ func (s *Stream) ffmpegArgs() []string {
 	}
 }
 
+func (s *Stream) ffmpegArgsH264MF() []string {
+	p := s.profile
+
+	args := s.ffmpegInputArgs()
+
+	args = append(args,
+		"-vf", "hwdownload,format=bgra,format=nv12",
+		"-pix_fmt", "nv12",
+
+		"-c:v", "h264_mf",
+		"-scenario", s.cfg.MFScenario,
+		"-hw_encoding", boolToFFmpegInt(s.cfg.MFHWEncoding),
+
+		"-g", strconv.Itoa(p.FPS),
+		"-b:v", fmt.Sprintf("%dk", p.BitrateKbps),
+
+		"-f", "h264",
+		"pipe:1",
+	)
+
+	return args
+}
+
 func (s *Stream) ffmpegInputArgs() []string {
 	g := s.geom
 	p := s.profile
+
+	source := fmt.Sprintf(
+		"ddagrab=framerate=%d:video_size=%dx%d:offset_x=%d:offset_y=%d:draw_mouse=0:dup_frames=1",
+		p.FPS,
+		g.Width,
+		g.Height,
+		g.X,
+		g.Y,
+	)
 
 	return []string{
 		"-hide_banner",
 		"-loglevel", "warning",
 
-		"-f", "gdigrab",
-		"-draw_mouse", "1",
-		"-framerate", strconv.Itoa(p.FPS),
-		"-offset_x", strconv.Itoa(g.X),
-		"-offset_y", strconv.Itoa(g.Y),
-		"-video_size", fmt.Sprintf("%dx%d", g.Width, g.Height),
-		"-i", "desktop",
+		"-f", "lavfi",
+		"-i", source,
 
 		"-an",
 	}
@@ -326,6 +361,7 @@ func (s *Stream) ffmpegArgsVP8Libvpx() []string {
 
 	args = append(args,
 		"-c:v", "libvpx",
+		"-vf", "hwdownload,format=bgra",
 		"-deadline", "realtime",
 		"-cpu-used", "8",
 		"-lag-in-frames", "0",
@@ -362,7 +398,7 @@ func (s *Stream) ffmpegArgsAV1MF() []string {
 		// gdigrab отдает RGB/BGRA-like frames, а MediaFoundation AV1 encoder
 		// обычно не принимает их напрямую. NV12 — самый совместимый формат
 		// для hardware video encoders на Windows.
-		"-vf", "format=nv12",
+		"-vf", "hwdownload,format=bgra,format=nv12",
 		"-pix_fmt", "nv12",
 
 		"-c:v", "av1_mf",
@@ -370,7 +406,6 @@ func (s *Stream) ffmpegArgsAV1MF() []string {
 		// Эти опции зависят от конкретной сборки FFmpeg и драйвера.
 		// Перед включением в production проверить:
 		// ffmpeg -hide_banner -h encoder=av1_mf
-		"-scenario", s.cfg.MFScenario,
 		"-hw_encoding", boolToFFmpegInt(s.cfg.MFHWEncoding),
 
 		"-g", strconv.Itoa(p.FPS*2),
@@ -635,52 +670,7 @@ func (s *Stream) startFFmpegLocked() error {
 		}
 	}()
 
-	go func(profile Profile) {
-		ivf, _, err := ivfreader.NewWith(stdout)
-		if err != nil {
-			logger.RDAgent.Errorf("ivf reader create failed: %v", err)
-			return
-		}
-
-		frameDuration := time.Second / time.Duration(profile.FPS)
-		frameCount := 0
-		lastLog := time.Now()
-
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			default:
-			}
-
-			frame, _, err := ivf.ParseNextFrame()
-			if err != nil {
-				if err != io.EOF && s.ctx.Err() == nil {
-					logger.RDAgent.Errorf("read encoded video frame stopped: codec=%s error=%v", s.cfg.VideoCodec, err)
-				}
-				return
-			}
-
-			s.mu.Lock()
-			s.lastFrameAt = time.Now()
-			s.mu.Unlock()
-
-			frameCount++
-			if time.Since(lastLog) >= 2*time.Second {
-				logger.RDAgent.Debugf("%s frames sent: %d in last 2s", s.cfg.VideoCodec, frameCount)
-				frameCount = 0
-				lastLog = time.Now()
-			}
-
-			if err := s.track.WriteSample(media.Sample{
-				Data:     frame,
-				Duration: frameDuration,
-			}); err != nil && err != io.ErrClosedPipe {
-				logger.RDAgent.Errorf("write video sample failed: %v", err)
-				return
-			}
-		}
-	}(s.profile)
+	go s.forwardEncodedVideo(stdout, s.profile)
 
 	logger.RDAgent.Infof(
 		"FFmpeg started: encoder=%s codec=%s command=%s %s",
@@ -690,6 +680,183 @@ func (s *Stream) startFFmpegLocked() error {
 		strings.Join(args, " "),
 	)
 	return nil
+}
+
+func (s *Stream) forwardEncodedVideo(stdout io.Reader, profile Profile) {
+	switch s.cfg.VideoEncoder {
+	case "h264_mf":
+		s.forwardH264AnnexB(stdout, profile)
+
+	case "av1_mf":
+		s.forwardIVF(stdout, profile)
+
+	case "libvpx":
+		fallthrough
+	default:
+		s.forwardIVF(stdout, profile)
+	}
+}
+
+func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
+	ivf, _, err := ivfreader.NewWith(stdout)
+	if err != nil {
+		logger.RDAgent.Errorf("ivf reader create failed: %v", err)
+		return
+	}
+
+	frameDuration := time.Second / time.Duration(profile.FPS)
+	frameCount := 0
+	lastLog := time.Now()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
+
+		frame, _, err := ivf.ParseNextFrame()
+		if err != nil {
+			if err != io.EOF && s.ctx.Err() == nil {
+				logger.RDAgent.Errorf("read IVF video frame stopped: codec=%s error=%v", s.cfg.VideoCodec, err)
+			}
+			return
+		}
+
+		s.markFrameSent()
+
+		frameCount++
+		if time.Since(lastLog) >= 2*time.Second {
+			logger.RDAgent.Debugf("%s IVF frames sent: %d in last 2s", s.cfg.VideoCodec, frameCount)
+			frameCount = 0
+			lastLog = time.Now()
+		}
+
+		if err := s.track.WriteSample(media.Sample{
+			Data:     frame,
+			Duration: frameDuration,
+		}); err != nil && err != io.ErrClosedPipe {
+			logger.RDAgent.Errorf("write IVF video sample failed: %v", err)
+			return
+		}
+	}
+}
+
+type h264AccessUnitReader struct {
+	reader  *h264reader.H264Reader
+	pending *h264reader.NAL
+}
+
+func newH264AccessUnitReader(r io.Reader) (*h264AccessUnitReader, error) {
+	reader, err := h264reader.NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return &h264AccessUnitReader{
+		reader: reader,
+	}, nil
+}
+
+func (r *h264AccessUnitReader) ReadAccessUnit() ([]byte, error) {
+	var accessUnit []byte
+	hasVCL := false
+
+	for {
+		nal := r.pending
+		r.pending = nil
+
+		if nal == nil {
+			next, err := r.reader.NextNAL()
+			if err != nil {
+				if err == io.EOF && len(accessUnit) > 0 {
+					return accessUnit, nil
+				}
+				return nil, err
+			}
+
+			nal = next
+		}
+
+		if nal == nil || len(nal.Data) == 0 {
+			continue
+		}
+
+		nalType := nal.Data[0] & 0x1F
+		isVCL := nalType == 1 || nalType == 5
+
+		if isVCL && hasVCL {
+			r.pending = nal
+			return accessUnit, nil
+		}
+
+		accessUnit = appendAnnexBNAL(accessUnit, nal.Data)
+
+		if isVCL {
+			hasVCL = true
+		}
+	}
+}
+
+func appendAnnexBNAL(dst []byte, nal []byte) []byte {
+	dst = append(dst, 0x00, 0x00, 0x00, 0x01)
+	dst = append(dst, nal...)
+	return dst
+}
+
+func (s *Stream) forwardH264AnnexB(stdout io.Reader, profile Profile) {
+	reader, err := newH264AccessUnitReader(stdout)
+	if err != nil {
+		logger.RDAgent.Errorf("h264 reader create failed: %v", err)
+		return
+	}
+
+	frameDuration := time.Second / time.Duration(profile.FPS)
+	frameCount := 0
+	lastLog := time.Now()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
+
+		accessUnit, err := reader.ReadAccessUnit()
+		if err != nil {
+			if err != io.EOF && s.ctx.Err() == nil {
+				logger.RDAgent.Errorf("read H264 access unit stopped: %v", err)
+			}
+			return
+		}
+
+		if len(accessUnit) == 0 {
+			continue
+		}
+
+		s.markFrameSent()
+
+		frameCount++
+		if time.Since(lastLog) >= 2*time.Second {
+			logger.RDAgent.Debugf("H264 access units sent: %d in last 2s", frameCount)
+			frameCount = 0
+			lastLog = time.Now()
+		}
+
+		if err := s.track.WriteSample(media.Sample{
+			Data:     accessUnit,
+			Duration: frameDuration,
+		}); err != nil && err != io.ErrClosedPipe {
+			logger.RDAgent.Errorf("write H264 video sample failed: %v", err)
+			return
+		}
+	}
+}
+
+func (s *Stream) markFrameSent() {
+	s.mu.Lock()
+	s.lastFrameAt = time.Now()
+	s.mu.Unlock()
 }
 
 func (s *Stream) stopFFmpegLocked() {
@@ -1056,65 +1223,58 @@ func (s *Stream) forceKeyframeOnPLI(reason string) {
 
 	switch s.cfg.VideoEncoder {
 	case "libvpx":
-		// В текущей FFmpeg CLI pipeline Go-код не владеет libvpx encoder context.
-		// Поэтому true "force next frame keyframe" невозможен без перехода на libavcodec
-		// или encoder-specific control API. Практический fallback — быстрый refresh
-		// без изменения профиля: новый encoder начинает GOP с keyframe.
-		logger.RDAgent.Infof(
-			"PLI/FIR recovery: refreshing VP8 encoder without profile downgrade: reason=%s profile=%+v",
+		s.refreshEncoderLocked(
+			"PLI/FIR recovery: refreshing VP8 encoder without profile downgrade",
 			reason,
+			geom,
 			profile,
 		)
 
-		s.stopFFmpegLocked()
-		s.geom = geom
-		s.profile = profile
-		s.lastFrameAt = time.Now()
-
-		if err := s.startFFmpegLocked(); err != nil {
-			logger.RDAgent.Errorf("PLI/FIR encoder refresh failed: %v", err)
-			return
-		}
-
-		screen.SetCaptureGeometry(screen.Geometry{
-			X:      s.geom.X,
-			Y:      s.geom.Y,
-			Width:  s.geom.Width,
-			Height: s.geom.Height,
-		})
+	case "h264_mf":
+		s.refreshEncoderLocked(
+			"PLI/FIR recovery: refreshing H264 encoder without profile downgrade",
+			reason,
+			geom,
+			profile,
+		)
 
 	case "av1_mf":
-		// Placeholder для стратегической ветки.
-		// Если av1_mf через FFmpeg CLI тоже не даст runtime force-keyframe,
-		// здесь останется такой же refresh fallback. Если backend будет переведен
-		// на libavcodec/MediaFoundation API, именно этот метод должен дергать
-		// encoder control для next intra frame.
-		logger.RDAgent.Infof(
-			"PLI/FIR recovery requested for av1_mf: reason=%s profile=%+v",
+		s.refreshEncoderLocked(
+			"PLI/FIR recovery: refreshing AV1 encoder without profile downgrade",
 			reason,
+			geom,
 			profile,
 		)
-
-		s.stopFFmpegLocked()
-		s.geom = geom
-		s.profile = profile
-		s.lastFrameAt = time.Now()
-
-		if err := s.startFFmpegLocked(); err != nil {
-			logger.RDAgent.Errorf("PLI/FIR av1_mf refresh failed: %v", err)
-			return
-		}
-
-		screen.SetCaptureGeometry(screen.Geometry{
-			X:      s.geom.X,
-			Y:      s.geom.Y,
-			Width:  s.geom.Width,
-			Height: s.geom.Height,
-		})
 
 	default:
 		logger.RDAgent.Warnf("PLI/FIR recovery ignored: unsupported encoder=%s", s.cfg.VideoEncoder)
 	}
+}
+
+func (s *Stream) refreshEncoderLocked(logPrefix string, reason string, geom Geometry, profile Profile) {
+	logger.RDAgent.Infof(
+		"%s: reason=%s profile=%+v",
+		logPrefix,
+		reason,
+		profile,
+	)
+
+	s.stopFFmpegLocked()
+	s.geom = geom
+	s.profile = profile
+	s.lastFrameAt = time.Now()
+
+	if err := s.startFFmpegLocked(); err != nil {
+		logger.RDAgent.Errorf("%s failed: %v", logPrefix, err)
+		return
+	}
+
+	screen.SetCaptureGeometry(screen.Geometry{
+		X:      s.geom.X,
+		Y:      s.geom.Y,
+		Width:  s.geom.Width,
+		Height: s.geom.Height,
+	})
 }
 
 func (s *Stream) readRTCP(ctx context.Context) {
@@ -1159,23 +1319,23 @@ func (s *Stream) readRTCP(ctx context.Context) {
 
 func lowProfile24() Profile {
 	return Profile{
-		FPS:          24,
-		BitrateKbps:  1400,
-		MaxrateKbps:  2200,
-		BufsizeKbps:  3300,
-		CRF:          34,
-		StaticThresh: 700,
+		FPS:          16,
+		BitrateKbps:  700,
+		MaxrateKbps:  900,
+		BufsizeKbps:  900,
+		CRF:          38,
+		StaticThresh: 900,
 	}
 }
 
 func mediumProfile24() Profile {
 	return Profile{
-		FPS:          24,
-		BitrateKbps:  2400,
-		MaxrateKbps:  3800,
-		BufsizeKbps:  5700,
-		CRF:          32,
-		StaticThresh: 500,
+		FPS:          20,
+		BitrateKbps:  1100,
+		MaxrateKbps:  1600,
+		BufsizeKbps:  344,
+		CRF:          36,
+		StaticThresh: 700,
 	}
 }
 
