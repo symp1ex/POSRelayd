@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"rdagent/internal/config"
 	"rdagent/internal/screen"
 	"strconv"
 	"strings"
@@ -93,6 +94,7 @@ type Stream struct {
 	sessionID string
 	track     *webrtc.TrackLocalStaticSample
 	sender    *webrtc.RTPSender
+	cfg       config.Config
 
 	mu          sync.Mutex
 	ctx         context.Context
@@ -106,17 +108,23 @@ type Stream struct {
 	rembBps atomic.Uint64
 	pliCnt  atomic.Uint64
 	nackCnt atomic.Uint64
+
+	keyframeReqCh     chan string
+	lastKeyframeForce time.Time
 }
 
-func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *webrtc.RTPSender) (*Stream, error) {
+func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *webrtc.RTPSender, cfg config.Config) (*Stream, error) {
 	return &Stream{
 		sessionID: sessionID,
 		track:     track,
 		sender:    sender,
+		cfg:       cfg,
 
 		// Не стартуем с ultra: это создаёт CPU/network spike в начале сессии.
 		// Более высокий профиль будет выбран позже только после устойчивой стабильности.
 		profile: mediumProfile24(),
+
+		keyframeReqCh: make(chan string, 1),
 	}, nil
 }
 
@@ -174,6 +182,7 @@ func (s *Stream) Start() error {
 	})
 
 	go s.readRTCP(ctx)
+	go s.watchKeyframeRequests(ctx)
 	go s.watchGeometry(ctx)
 	go s.watchDesktop(ctx)
 	go s.watchFrameStall(ctx)
@@ -280,6 +289,17 @@ func monitorGeometry(monitor uintptr) (Geometry, bool) {
 	}, true
 }
 func (s *Stream) ffmpegArgs() []string {
+	switch s.cfg.VideoEncoder {
+	case "av1_mf":
+		return s.ffmpegArgsAV1MF()
+	case "libvpx":
+		fallthrough
+	default:
+		return s.ffmpegArgsVP8Libvpx()
+	}
+}
+
+func (s *Stream) ffmpegInputArgs() []string {
 	g := s.geom
 	p := s.profile
 
@@ -296,7 +316,15 @@ func (s *Stream) ffmpegArgs() []string {
 		"-i", "desktop",
 
 		"-an",
+	}
+}
 
+func (s *Stream) ffmpegArgsVP8Libvpx() []string {
+	p := s.profile
+
+	args := s.ffmpegInputArgs()
+
+	args = append(args,
 		"-c:v", "libvpx",
 		"-deadline", "realtime",
 		"-cpu-used", "8",
@@ -305,7 +333,7 @@ func (s *Stream) ffmpegArgs() []string {
 		"-auto-alt-ref", "0",
 		"-quality", "realtime",
 
-		"-g", strconv.Itoa(p.FPS * 2),
+		"-g", strconv.Itoa(p.FPS*2),
 		"-keyint_min", strconv.Itoa(p.FPS),
 
 		// Constrained-quality: CRF задаёт желаемое качество,
@@ -320,7 +348,46 @@ func (s *Stream) ffmpegArgs() []string {
 
 		"-f", "ivf",
 		"pipe:1",
+	)
+
+	return args
+}
+
+func (s *Stream) ffmpegArgsAV1MF() []string {
+	p := s.profile
+
+	args := s.ffmpegInputArgs()
+
+	args = append(args,
+		// gdigrab отдает RGB/BGRA-like frames, а MediaFoundation AV1 encoder
+		// обычно не принимает их напрямую. NV12 — самый совместимый формат
+		// для hardware video encoders на Windows.
+		"-vf", "format=nv12",
+		"-pix_fmt", "nv12",
+
+		"-c:v", "av1_mf",
+
+		// Эти опции зависят от конкретной сборки FFmpeg и драйвера.
+		// Перед включением в production проверить:
+		// ffmpeg -hide_banner -h encoder=av1_mf
+		"-scenario", s.cfg.MFScenario,
+		"-hw_encoding", boolToFFmpegInt(s.cfg.MFHWEncoding),
+
+		"-g", strconv.Itoa(p.FPS*2),
+		"-b:v", fmt.Sprintf("%dk", p.BitrateKbps),
+
+		"-f", "ivf",
+		"pipe:1",
+	)
+
+	return args
+}
+
+func boolToFFmpegInt(v bool) string {
+	if v {
+		return "1"
 	}
+	return "0"
 }
 
 func ffmpegPath() string {
@@ -589,7 +656,7 @@ func (s *Stream) startFFmpegLocked() error {
 			frame, _, err := ivf.ParseNextFrame()
 			if err != nil {
 				if err != io.EOF && s.ctx.Err() == nil {
-					logger.RDAgent.Errorf("read VP8 frame stopped: %v", err)
+					logger.RDAgent.Errorf("read encoded video frame stopped: codec=%s error=%v", s.cfg.VideoCodec, err)
 				}
 				return
 			}
@@ -600,7 +667,7 @@ func (s *Stream) startFFmpegLocked() error {
 
 			frameCount++
 			if time.Since(lastLog) >= 2*time.Second {
-				logger.RDAgent.Debugf("VP8 frames sent: %d in last 2s", frameCount)
+				logger.RDAgent.Debugf("%s frames sent: %d in last 2s", s.cfg.VideoCodec, frameCount)
 				frameCount = 0
 				lastLog = time.Now()
 			}
@@ -615,7 +682,13 @@ func (s *Stream) startFFmpegLocked() error {
 		}
 	}(s.profile)
 
-	logger.RDAgent.Infof("FFmpeg started: %s %s", bin, strings.Join(args, " "))
+	logger.RDAgent.Infof(
+		"FFmpeg started: encoder=%s codec=%s command=%s %s",
+		s.cfg.VideoEncoder,
+		s.cfg.VideoCodec,
+		bin,
+		strings.Join(args, " "),
+	)
 	return nil
 }
 
@@ -798,10 +871,6 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 		// NACK — главный сигнал потерь.
 		highNackThreshold = uint64(80)
 
-		// PLI/FIR сам по себе не должен рестартить encoder.
-		// Он часто означает "нужен keyframe", а не "нужно менять профиль".
-		highPLIThreshold = uint64(8)
-
 		// Более ранний downgrade по REMB.
 		rembDropRatio = 0.90
 
@@ -829,22 +898,7 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 			currentBps := uint64(current.BitrateKbps * 1000)
 
 			hasLoss := nack >= highNackThreshold
-			hasPLIStorm := pli >= highPLIThreshold
 			hasLowREMB := remb > 0 && remb < uint64(float64(currentBps)*rembDropRatio)
-
-			// PLI/FIR не используем как самостоятельную причину restart.
-			// В текущей FFmpeg-pipeline нельзя дёшево послать encoder control,
-			// поэтому лучше не перезапускать процесс на каждый keyframe request.
-			if hasPLIStorm && !hasLoss && !hasLowREMB {
-				logger.RDAgent.Debugf(
-					"PLI/FIR storm observed without loss/low REMB: profile=%+v remb=%d pli=%d nack=%d",
-					current,
-					remb,
-					pli,
-					nack,
-				)
-				continue
-			}
 
 			if !hasLoss && !hasLowREMB {
 				stableTicks++
@@ -944,6 +998,125 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 	}
 }
 
+func (s *Stream) requestKeyframeRecovery(reason string) {
+	if !s.cfg.ForceKeyframeOnPLI {
+		return
+	}
+
+	select {
+	case s.keyframeReqCh <- reason:
+	default:
+		// Coalesce PLI/FIR bursts. Одного pending refresh достаточно.
+	}
+}
+
+func (s *Stream) watchKeyframeRequests(ctx context.Context) {
+	cooldown := time.Duration(s.cfg.PLIKeyframeCooldownMs) * time.Millisecond
+	if cooldown <= 0 {
+		cooldown = 750 * time.Millisecond
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case reason := <-s.keyframeReqCh:
+			s.mu.Lock()
+			since := time.Since(s.lastKeyframeForce)
+			if !s.lastKeyframeForce.IsZero() && since < cooldown {
+				s.mu.Unlock()
+
+				logger.RDAgent.Debugf(
+					"PLI/FIR keyframe recovery skipped by cooldown: reason=%s since=%s cooldown=%s",
+					reason,
+					since,
+					cooldown,
+				)
+				continue
+			}
+			s.lastKeyframeForce = time.Now()
+			s.mu.Unlock()
+
+			s.forceKeyframeOnPLI(reason)
+		}
+	}
+}
+
+func (s *Stream) forceKeyframeOnPLI(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ctx == nil {
+		return
+	}
+
+	geom := s.geom
+	profile := s.profile
+
+	switch s.cfg.VideoEncoder {
+	case "libvpx":
+		// В текущей FFmpeg CLI pipeline Go-код не владеет libvpx encoder context.
+		// Поэтому true "force next frame keyframe" невозможен без перехода на libavcodec
+		// или encoder-specific control API. Практический fallback — быстрый refresh
+		// без изменения профиля: новый encoder начинает GOP с keyframe.
+		logger.RDAgent.Infof(
+			"PLI/FIR recovery: refreshing VP8 encoder without profile downgrade: reason=%s profile=%+v",
+			reason,
+			profile,
+		)
+
+		s.stopFFmpegLocked()
+		s.geom = geom
+		s.profile = profile
+		s.lastFrameAt = time.Now()
+
+		if err := s.startFFmpegLocked(); err != nil {
+			logger.RDAgent.Errorf("PLI/FIR encoder refresh failed: %v", err)
+			return
+		}
+
+		screen.SetCaptureGeometry(screen.Geometry{
+			X:      s.geom.X,
+			Y:      s.geom.Y,
+			Width:  s.geom.Width,
+			Height: s.geom.Height,
+		})
+
+	case "av1_mf":
+		// Placeholder для стратегической ветки.
+		// Если av1_mf через FFmpeg CLI тоже не даст runtime force-keyframe,
+		// здесь останется такой же refresh fallback. Если backend будет переведен
+		// на libavcodec/MediaFoundation API, именно этот метод должен дергать
+		// encoder control для next intra frame.
+		logger.RDAgent.Infof(
+			"PLI/FIR recovery requested for av1_mf: reason=%s profile=%+v",
+			reason,
+			profile,
+		)
+
+		s.stopFFmpegLocked()
+		s.geom = geom
+		s.profile = profile
+		s.lastFrameAt = time.Now()
+
+		if err := s.startFFmpegLocked(); err != nil {
+			logger.RDAgent.Errorf("PLI/FIR av1_mf refresh failed: %v", err)
+			return
+		}
+
+		screen.SetCaptureGeometry(screen.Geometry{
+			X:      s.geom.X,
+			Y:      s.geom.Y,
+			Width:  s.geom.Width,
+			Height: s.geom.Height,
+		})
+
+	default:
+		logger.RDAgent.Warnf("PLI/FIR recovery ignored: unsupported encoder=%s", s.cfg.VideoEncoder)
+	}
+}
+
 func (s *Stream) readRTCP(ctx context.Context) {
 	buf := make([]byte, 1500)
 
@@ -968,10 +1141,15 @@ func (s *Stream) readRTCP(ctx context.Context) {
 			switch p := pkt.(type) {
 			case *rtcp.PictureLossIndication:
 				s.pliCnt.Add(1)
+				s.requestKeyframeRecovery("rtcp pli")
+
 			case *rtcp.FullIntraRequest:
 				s.pliCnt.Add(1)
+				s.requestKeyframeRecovery("rtcp fir")
+
 			case *rtcp.TransportLayerNack:
 				s.nackCnt.Add(uint64(len(p.Nacks)))
+
 			case *rtcp.ReceiverEstimatedMaximumBitrate:
 				s.rembBps.Store(uint64(p.Bitrate))
 			}

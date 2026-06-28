@@ -3,6 +3,7 @@ package rtc
 import (
 	"encoding/json"
 	"fmt"
+	"rdagent/internal/config"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ type Peer struct {
 	sessionID string
 	clientID  string
 	sender    SignalSender
+	cfg       config.Config
 
 	mu sync.Mutex
 
@@ -36,11 +38,12 @@ type Peer struct {
 	control *control.Handler
 }
 
-func NewPeer(sessionID string, clientID string, sender SignalSender, iceServers []webrtc.ICEServer) *Peer {
+func NewPeer(sessionID string, clientID string, sender SignalSender, iceServers []webrtc.ICEServer, cfg config.Config) *Peer {
 	return &Peer{
 		sessionID:  sessionID,
 		clientID:   clientID,
 		sender:     sender,
+		cfg:        cfg,
 		iceServers: iceServers,
 		seenRemote: make(map[string]struct{}),
 		control:    control.NewHandler(sessionID),
@@ -311,7 +314,7 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 
 	videoTrack, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{
-			MimeType:  webrtc.MimeTypeVP8,
+			MimeType:  videoMimeType(p.cfg.VideoCodec),
 			ClockRate: 90000,
 		},
 		"desktop",
@@ -331,7 +334,7 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 		return nil, fmt.Errorf("add desktop track: %w", err)
 	}
 
-	stream, err := desktop.NewStream(p.sessionID, videoTrack, rtpSender)
+	stream, err := desktop.NewStream(p.sessionID, videoTrack, rtpSender, p.cfg)
 	if err != nil {
 		_ = pc.Close()
 		p.pc = nil
@@ -341,6 +344,17 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 
 	logger.RDAgent.Info("PeerConnection with desktop video track created")
 	return pc, nil
+}
+
+func videoMimeType(codec string) string {
+	switch codec {
+	case "av1":
+		return webrtc.MimeTypeAV1
+	case "vp8":
+		fallthrough
+	default:
+		return webrtc.MimeTypeVP8
+	}
 }
 
 func (p *Peer) scheduleDisconnectedClose(pc *webrtc.PeerConnection, delay time.Duration) {

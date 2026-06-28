@@ -26,6 +26,15 @@ type Config struct {
 
 	InsecureSkipVerify bool
 
+	// Video pipeline.
+	// Default remains VP8/libvpx for compatibility with the existing viewer.
+	VideoCodec            string
+	VideoEncoder          string
+	ForceKeyframeOnPLI    bool
+	PLIKeyframeCooldownMs int
+	MFScenario            string
+	MFHWEncoding          bool
+
 	TURNJSON   string
 	ICEServers []webrtc.ICEServer
 }
@@ -48,6 +57,14 @@ func Parse(args []string) (Config, error) {
 	fs.IntVar(&cfg.LogRetainDays, "log-retain-days", 14, "How many days rotated logs are retained")
 
 	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure-skip-verify", false, "Disable TLS certificate verification for wss")
+
+	fs.StringVar(&cfg.VideoCodec, "video-codec", "vp8", "Video codec: vp8 or av1")
+	fs.StringVar(&cfg.VideoEncoder, "video-encoder", "libvpx", "Video encoder: libvpx or av1_mf")
+	fs.BoolVar(&cfg.ForceKeyframeOnPLI, "force-keyframe-on-pli", true, "Force fast keyframe recovery on RTCP PLI/FIR")
+	fs.IntVar(&cfg.PLIKeyframeCooldownMs, "pli-keyframe-cooldown-ms", 750, "Minimum interval between forced keyframe recoveries")
+	fs.StringVar(&cfg.MFScenario, "mf-scenario", "display_remoting", "MediaFoundation encoder scenario")
+	fs.BoolVar(&cfg.MFHWEncoding, "mf-hw-encoding", true, "Enable MediaFoundation hardware encoding when supported")
+
 	fs.StringVar(&cfg.TURNJSON, "turn-json", os.Getenv("RD_TURN_JSON"), "TURN/STUN JSON config")
 
 	if err := fs.Parse(args); err != nil {
@@ -118,5 +135,30 @@ func (c Config) Validate() error {
 	if c.LogRetainDays <= 0 {
 		return fmt.Errorf("--log-retain-days must be positive")
 	}
+
+	switch c.VideoCodec {
+	case "vp8", "av1":
+	default:
+		return fmt.Errorf("--video-codec must be one of: vp8, av1")
+	}
+
+	switch c.VideoEncoder {
+	case "libvpx", "av1_mf":
+	default:
+		return fmt.Errorf("--video-encoder must be one of: libvpx, av1_mf")
+	}
+
+	if c.VideoCodec == "vp8" && c.VideoEncoder != "libvpx" {
+		return fmt.Errorf("--video-codec=vp8 requires --video-encoder=libvpx")
+	}
+
+	if c.VideoCodec == "av1" && c.VideoEncoder != "av1_mf" {
+		return fmt.Errorf("--video-codec=av1 currently requires --video-encoder=av1_mf")
+	}
+
+	if c.PLIKeyframeCooldownMs < 100 {
+		return fmt.Errorf("--pli-keyframe-cooldown-ms must be >= 100")
+	}
+
 	return nil
 }

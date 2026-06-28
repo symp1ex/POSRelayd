@@ -38,7 +38,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 		cfg:      cfg,
 		id:       id,
 		ws:       wsClient,
-		rtcPeer:  rtc.NewPeer(cfg.SessionID, cfg.ClientID, wsClient, cfg.ICEServers),
+		rtcPeer:  rtc.NewPeer(cfg.SessionID, cfg.ClientID, wsClient, cfg.ICEServers, cfg),
 		incoming: make(chan protocol.Message, 128),
 	}
 
