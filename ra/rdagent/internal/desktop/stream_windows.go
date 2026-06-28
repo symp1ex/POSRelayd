@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"rdagent/internal/screen"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,12 +32,39 @@ const (
 	smYVirtualScreen  = 77
 	smCXVirtualScreen = 78
 	smCYVirtualScreen = 79
+
+	monitorDefaultToNearest = 2
 )
 
 var (
 	user32               = syscall.NewLazyDLL("user32.dll")
 	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
+
+	procGetForegroundWindow = user32.NewProc("GetForegroundWindow")
+	procMonitorFromWindow   = user32.NewProc("MonitorFromWindow")
+	procMonitorFromPoint    = user32.NewProc("MonitorFromPoint")
+	procGetMonitorInfoW     = user32.NewProc("GetMonitorInfoW")
+	procGetCursorPos        = user32.NewProc("GetCursorPos")
 )
+
+type winPoint struct {
+	X int32
+	Y int32
+}
+
+type winRect struct {
+	Left   int32
+	Top    int32
+	Right  int32
+	Bottom int32
+}
+
+type monitorInfo struct {
+	CbSize    uint32
+	RcMonitor winRect
+	RcWork    winRect
+	DwFlags   uint32
+}
 
 type Geometry struct {
 	X      int
@@ -50,6 +78,15 @@ type Profile struct {
 	BitrateKbps int
 	MaxrateKbps int
 	BufsizeKbps int
+
+	// CRF включает constrained-quality поведение вместе с maxrate/bufsize.
+	// Для desktop-контента это лучше, чем жить только на target bitrate:
+	// текст/границы UI сохраняются лучше, а простые сцены сами снижают средний bitrate.
+	CRF int
+
+	// static-thresh позволяет libvpx пропускать почти неизменившиеся блоки.
+	// Для рабочего стола с большими статичными областями это снижает CPU/bitrate.
+	StaticThresh int
 }
 
 type Stream struct {
@@ -76,8 +113,28 @@ func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *w
 		sessionID: sessionID,
 		track:     track,
 		sender:    sender,
-		profile:   ultraProfile24(),
+
+		// Не стартуем с ultra: это создаёт CPU/network spike в начале сессии.
+		// Более высокий профиль будет выбран позже только после устойчивой стабильности.
+		profile: mediumProfile24(),
 	}, nil
+}
+
+func initialProfileForGeometry(g Geometry) Profile {
+	pixels := g.Width * g.Height
+
+	switch {
+	case pixels <= 1280*720:
+		return mediumProfile24()
+	case pixels <= 1920*1080:
+		return mediumProfile24()
+	case pixels <= 2560*1440:
+		return highProfile24()
+	default:
+		// Даже для 4K/ultrawide не стартуем с ultra.
+		// Ultra можно получить позже только через стабильный upgrade.
+		return highProfile24()
+	}
 }
 
 func (s *Stream) Start() error {
@@ -98,12 +155,23 @@ func (s *Stream) Start() error {
 	s.cancel = cancel
 	s.geom = geom
 
+	// Стартовый профиль зависит от реальной площади захвата.
+	// Это дешевле, чем всегда стартовать с ultra, особенно на 4K/ultrawide.
+	s.profile = initialProfileForGeometry(geom)
+
 	if err := s.startFFmpegLocked(); err != nil {
 		cancel()
 		s.ctx = nil
 		s.cancel = nil
 		return err
 	}
+
+	screen.SetCaptureGeometry(screen.Geometry{
+		X:      s.geom.X,
+		Y:      s.geom.Y,
+		Width:  s.geom.Width,
+		Height: s.geom.Height,
+	})
 
 	go s.readRTCP(ctx)
 	go s.watchGeometry(ctx)
@@ -128,10 +196,16 @@ func (s *Stream) Stop() {
 	}
 
 	s.stopFFmpegLocked()
+	screen.ClearCaptureGeometry()
 	logger.RDAgent.Info("Desktop stream stopped")
 }
 
 func currentGeometry() (Geometry, error) {
+	if geom, ok := activeMonitorGeometry(); ok {
+		return geom, nil
+	}
+
+	// Fallback: старое поведение, если WinAPI не смог определить монитор.
 	x, _, _ := procGetSystemMetrics.Call(smXVirtualScreen)
 	y, _, _ := procGetSystemMetrics.Call(smYVirtualScreen)
 	w, _, _ := procGetSystemMetrics.Call(smCXVirtualScreen)
@@ -145,12 +219,66 @@ func currentGeometry() (Geometry, error) {
 	}
 
 	if geom.Width <= 0 || geom.Height <= 0 {
-		return Geometry{}, fmt.Errorf("invalid primary monitor geometry: %+v", geom)
+		return Geometry{}, fmt.Errorf("invalid desktop geometry: %+v", geom)
 	}
 
 	return geom, nil
 }
 
+func activeMonitorGeometry() (Geometry, bool) {
+	// 1. Предпочитаем монитор активного окна.
+	hwnd, _, _ := procGetForegroundWindow.Call()
+	if hwnd != 0 {
+		monitor, _, _ := procMonitorFromWindow.Call(hwnd, monitorDefaultToNearest)
+		if geom, ok := monitorGeometry(monitor); ok {
+			return geom, true
+		}
+	}
+
+	// 2. Fallback: монитор под курсором.
+	var pt winPoint
+	if ret, _, _ := procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt))); ret != 0 {
+		// POINT передаётся в MonitorFromPoint как два int32, упакованные в uintptr.
+		point := uintptr(uint32(pt.X)) | (uintptr(uint32(pt.Y)) << 32)
+		monitor, _, _ := procMonitorFromPoint.Call(point, monitorDefaultToNearest)
+		if geom, ok := monitorGeometry(monitor); ok {
+			return geom, true
+		}
+	}
+
+	return Geometry{}, false
+}
+
+func monitorGeometry(monitor uintptr) (Geometry, bool) {
+	if monitor == 0 {
+		return Geometry{}, false
+	}
+
+	info := monitorInfo{
+		CbSize: uint32(unsafe.Sizeof(monitorInfo{})),
+	}
+
+	ret, _, _ := procGetMonitorInfoW.Call(
+		monitor,
+		uintptr(unsafe.Pointer(&info)),
+	)
+	if ret == 0 {
+		return Geometry{}, false
+	}
+
+	width := int(info.RcMonitor.Right - info.RcMonitor.Left)
+	height := int(info.RcMonitor.Bottom - info.RcMonitor.Top)
+	if width <= 0 || height <= 0 {
+		return Geometry{}, false
+	}
+
+	return Geometry{
+		X:      int(info.RcMonitor.Left),
+		Y:      int(info.RcMonitor.Top),
+		Width:  width,
+		Height: height,
+	}, true
+}
 func (s *Stream) ffmpegArgs() []string {
 	g := s.geom
 	p := s.profile
@@ -178,9 +306,17 @@ func (s *Stream) ffmpegArgs() []string {
 		"-quality", "realtime",
 
 		"-g", strconv.Itoa(p.FPS * 2),
+		"-keyint_min", strconv.Itoa(p.FPS),
+
+		// Constrained-quality: CRF задаёт желаемое качество,
+		// maxrate/bufsize ограничивают пики bitrate.
+		"-crf", strconv.Itoa(p.CRF),
 		"-b:v", fmt.Sprintf("%dk", p.BitrateKbps),
 		"-maxrate", fmt.Sprintf("%dk", p.MaxrateKbps),
 		"-bufsize", fmt.Sprintf("%dk", p.BufsizeKbps),
+
+		// Оптимизация для почти статичного desktop-контента.
+		"-static-thresh", strconv.Itoa(p.StaticThresh),
 
 		"-f", "ivf",
 		"pipe:1",
@@ -513,7 +649,22 @@ func (s *Stream) restart(reason string, newGeom Geometry, newProfile Profile) {
 
 	if err := s.startFFmpegLocked(); err != nil {
 		logger.RDAgent.Errorf("restart ffmpeg failed: %v", err)
+		return
 	}
+
+	screen.SetCaptureGeometry(screen.Geometry{
+		X:      s.geom.X,
+		Y:      s.geom.Y,
+		Width:  s.geom.Width,
+		Height: s.geom.Height,
+	})
+}
+
+func sameGeometry(a, b Geometry) bool {
+	return a.X == b.X &&
+		a.Y == b.Y &&
+		a.Width == b.Width &&
+		a.Height == b.Height
 }
 
 func (s *Stream) watchGeometry(ctx context.Context) {
@@ -535,7 +686,7 @@ func (s *Stream) watchGeometry(ctx context.Context) {
 			profile := s.profile
 			s.mu.Unlock()
 
-			if geom != old {
+			if !sameGeometry(geom, old) {
 				s.restart("desktop geometry changed", geom, profile)
 			}
 		}
@@ -638,17 +789,24 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 	lastRestart := time.Now()
 
 	const (
-		downCooldown = 15 * time.Second
-		upCooldown   = 60 * time.Second
+		// Downgrade должен происходить раньше, чтобы не накапливать freeze/burst.
+		downCooldown = 8 * time.Second
 
-		// Если за 5 секунд прилетело столько NACK/PLI —
-		// считаем, что канал реально деградировал.
-		highNackThreshold = uint64(120)
-		highPLIThreshold  = uint64(4)
+		// Upgrade только после длительной стабильности.
+		upCooldown = 120 * time.Second
 
-		// Если receiver estimated bitrate ниже текущего bitrate
-		// хотя бы на 25%, тоже считаем это сетевой деградацией.
-		rembDropRatio = 0.75
+		// NACK — главный сигнал потерь.
+		highNackThreshold = uint64(80)
+
+		// PLI/FIR сам по себе не должен рестартить encoder.
+		// Он часто означает "нужен keyframe", а не "нужно менять профиль".
+		highPLIThreshold = uint64(8)
+
+		// Более ранний downgrade по REMB.
+		rembDropRatio = 0.90
+
+		// Для upgrade требуем запас REMB относительно maxrate.
+		upgradeREMBHeadroom = 1.35
 	)
 
 	stableTicks := 0
@@ -670,8 +828,23 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 
 			currentBps := uint64(current.BitrateKbps * 1000)
 
-			hasLoss := nack >= highNackThreshold || pli >= highPLIThreshold
+			hasLoss := nack >= highNackThreshold
+			hasPLIStorm := pli >= highPLIThreshold
 			hasLowREMB := remb > 0 && remb < uint64(float64(currentBps)*rembDropRatio)
+
+			// PLI/FIR не используем как самостоятельную причину restart.
+			// В текущей FFmpeg-pipeline нельзя дёшево послать encoder control,
+			// поэтому лучше не перезапускать процесс на каждый keyframe request.
+			if hasPLIStorm && !hasLoss && !hasLowREMB {
+				logger.RDAgent.Debugf(
+					"PLI/FIR storm observed without loss/low REMB: profile=%+v remb=%d pli=%d nack=%d",
+					current,
+					remb,
+					pli,
+					nack,
+				)
+				continue
+			}
 
 			if !hasLoss && !hasLowREMB {
 				stableTicks++
@@ -685,8 +858,8 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 					stableTicks,
 				)
 
-				// Апгрейдим только после долгой стабильности.
-				if stableTicks < 12 {
+				// 24 тика по 5 секунд = 120 секунд устойчивой стабильности.
+				if stableTicks < 24 {
 					continue
 				}
 
@@ -697,6 +870,21 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 				target := nextHigherProfile(current)
 				if target == current {
 					continue
+				}
+
+				// Upgrade разрешаем только если REMB даёт запас над maxrate нового профиля.
+				if remb > 0 {
+					required := uint64(float64(target.MaxrateKbps*1000) * upgradeREMBHeadroom)
+					if remb < required {
+						logger.RDAgent.Debugf(
+							"Upgrade skipped: insufficient REMB headroom current=%+v target=%+v remb=%d required=%d",
+							current,
+							target,
+							remb,
+							required,
+						)
+						continue
+					}
 				}
 
 				lastRestart = time.Now()
@@ -730,14 +918,10 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 
 			target := nextLowerProfile(current)
 
-			// Если REMB очень низкий — сразу падаем сильнее.
-			if remb > 0 && remb < 2_000_000 {
-				target = Profile{
-					FPS:         24,
-					BitrateKbps: 1600,
-					MaxrateKbps: 2200,
-					BufsizeKbps: 3300,
-				}
+			// Если REMB уже ниже low maxrate — сразу падаем на low.
+			// Используем функцию профиля, чтобы не потерять CRF/static-thresh.
+			if remb > 0 && remb < uint64(lowProfile24().MaxrateKbps*1000) {
+				target = lowProfile24()
 			}
 
 			if target == current {
@@ -797,37 +981,45 @@ func (s *Stream) readRTCP(ctx context.Context) {
 
 func lowProfile24() Profile {
 	return Profile{
-		FPS:         24,
-		BitrateKbps: 1600,
-		MaxrateKbps: 2200,
-		BufsizeKbps: 3300,
+		FPS:          24,
+		BitrateKbps:  1400,
+		MaxrateKbps:  2200,
+		BufsizeKbps:  3300,
+		CRF:          34,
+		StaticThresh: 700,
 	}
 }
 
 func mediumProfile24() Profile {
 	return Profile{
-		FPS:         24,
-		BitrateKbps: 2800,
-		MaxrateKbps: 3800,
-		BufsizeKbps: 5700,
+		FPS:          24,
+		BitrateKbps:  2400,
+		MaxrateKbps:  3800,
+		BufsizeKbps:  5700,
+		CRF:          32,
+		StaticThresh: 500,
 	}
 }
 
 func highProfile24() Profile {
 	return Profile{
-		FPS:         24,
-		BitrateKbps: 4500,
-		MaxrateKbps: 6000,
-		BufsizeKbps: 9000,
+		FPS:          24,
+		BitrateKbps:  3800,
+		MaxrateKbps:  6000,
+		BufsizeKbps:  9000,
+		CRF:          30,
+		StaticThresh: 350,
 	}
 }
 
 func ultraProfile24() Profile {
 	return Profile{
-		FPS:         24,
-		BitrateKbps: 7000,
-		MaxrateKbps: 9000,
-		BufsizeKbps: 13500,
+		FPS:          24,
+		BitrateKbps:  6000,
+		MaxrateKbps:  9000,
+		BufsizeKbps:  13500,
+		CRF:          28,
+		StaticThresh: 250,
 	}
 }
 

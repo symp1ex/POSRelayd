@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"rdagent/internal/logger"
+	"rdagent/internal/screen"
 	"rdagent/internal/winsta"
 	"sync"
 	"syscall"
@@ -131,9 +132,10 @@ type cursorCache struct {
 }
 
 var inputCache = struct {
-	mu     sync.Mutex
-	geom   virtualScreenGeometry
-	cursor cursorCache
+	mu              sync.Mutex
+	geom            virtualScreenGeometry
+	geometryVersion uint64
+	cursor          cursorCache
 }{}
 
 var getSystemMetrics = func(index int) int {
@@ -630,6 +632,19 @@ func (i *Injector) releaseAllLocked() {
 }
 
 func refreshVirtualScreenGeometryLocked() {
+	if g, version, ok := screen.CaptureGeometry(); ok {
+		inputCache.geom = virtualScreenGeometry{
+			left:   g.X,
+			top:    g.Y,
+			width:  maxInt(g.Width, 1),
+			height: maxInt(g.Height, 1),
+			valid:  true,
+		}
+		inputCache.geometryVersion = version
+		inputCache.cursor.valid = false
+		return
+	}
+
 	width := getSystemMetrics(smCXVirtualScreen)
 	height := getSystemMetrics(smCYVirtualScreen)
 
@@ -647,6 +662,15 @@ func refreshVirtualScreenGeometryLocked() {
 		height: height,
 		valid:  true,
 	}
+	inputCache.geometryVersion = 0
+	inputCache.cursor.valid = false
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func RefreshInputGeometry() {
@@ -661,7 +685,10 @@ func normalizedToScreen(x, y float64) (int, int) {
 	inputCache.mu.Lock()
 	defer inputCache.mu.Unlock()
 
-	if !inputCache.geom.valid {
+	_, version, hasCaptureGeometry := screen.CaptureGeometry()
+	if !inputCache.geom.valid ||
+		(hasCaptureGeometry && inputCache.geometryVersion != version) ||
+		(!hasCaptureGeometry && inputCache.geometryVersion != 0) {
 		refreshVirtualScreenGeometryLocked()
 	}
 
