@@ -12,6 +12,41 @@ sys_manager = service.sys_manager.ResourceManagement()
 client_identity = service.crypto.ClientIdentityManager()
 
 
+def normalize_display_config(display_config):
+    if not isinstance(display_config, dict):
+        display_config = {}
+
+    quality = str(display_config.get("quality") or "auto").strip().lower()
+    codec = str(display_config.get("codec") or "h264").strip().lower()
+
+    if quality not in ("auto", "low", "medium", "high", "ultra"):
+        service.logger.logger_service.warning(
+            f"Unsupported display quality '{quality}', fallback to 'auto'"
+        )
+        quality = "auto"
+
+    if codec not in ("auto", "vp8", "h264", "av1"):
+        service.logger.logger_service.warning(
+            f"Unsupported display codec '{codec}', fallback to 'h264'"
+        )
+        codec = "h264"
+
+    if codec == "auto":
+        codec = "h264"
+
+    return {
+        "quality": quality,
+        "codec": codec,
+    }
+
+
+def video_encoder_for_codec(codec):
+    if codec == "vp8":
+        return "libvpx"
+    if codec == "av1":
+        return "av1_mf"
+    return "h264_mf"
+
 class RDAgentSupervisor:
     def __init__(self, ws_url: str, client_id: str, api_key: str):
         self.ws_url = ws_url
@@ -32,7 +67,7 @@ class RDAgentSupervisor:
         self.log_level = service.logger.level
         self.log_days = service.logger.log_days
 
-    def start(self, session_id: str, token: str, turn_config):
+    def start(self, session_id: str, token: str, turn_config, display_config=None):
         if not session_id:
             service.logger.logger_service.warning("rd_start без session_id")
             return False
@@ -63,6 +98,11 @@ class RDAgentSupervisor:
                 )
                 return False
 
+            display = normalize_display_config(display_config)
+            video_codec = display["codec"]
+            video_encoder = video_encoder_for_codec(video_codec)
+            video_quality = display["quality"]
+
             env = os.environ.copy()
             env["RD_WS_URL"] = self.ws_url
             env["RD_CLIENT_ID"] = self.client_id
@@ -71,6 +111,8 @@ class RDAgentSupervisor:
             env["RD_TURN_JSON"] = json.dumps(turn_config or {}, ensure_ascii=False)
             env["RD_LOG_FILE"] = self.log_dir
             env["RD_WORK_DIR"] = self.work_dir
+            env["RD_VIDEO_QUALITY"] = video_quality
+            env["RD_VIDEO_CODEC"] = video_codec
 
             args = [
                 self.agent_path,
@@ -83,6 +125,9 @@ class RDAgentSupervisor:
                 "--log-dir", self.log_dir,
                 "--log-level", self.log_level,
                 "--log-retain-days", str(self.log_days),
+                "--video-quality", video_quality,
+                "--video-codec", video_codec,
+                "--video-encoder", video_encoder,
             ]
 
             try:
@@ -106,7 +151,8 @@ class RDAgentSupervisor:
                     f"Запущен rd-agent для session_id='{session_id}', pid={proc.pid}"
                 )
                 service.logger.logger_service.debug(
-                    f"rd-agent log_path='{self.log_dir}', work_dir='{self.work_dir}'"
+                    f"rd-agent log_path='{self.log_dir}', work_dir='{self.work_dir}', "
+                    f"video_quality='{video_quality}', video_codec='{video_codec}', video_encoder='{video_encoder}'"
                 )
                 return True
 

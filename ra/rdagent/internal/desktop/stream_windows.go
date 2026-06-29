@@ -97,6 +97,8 @@ type Stream struct {
 	sender    *webrtc.RTPSender
 	cfg       config.Config
 
+	onEncoderFailed func(error)
+
 	mu          sync.Mutex
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -114,12 +116,19 @@ type Stream struct {
 	lastKeyframeForce time.Time
 }
 
-func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *webrtc.RTPSender, cfg config.Config) (*Stream, error) {
+func NewStream(
+	sessionID string,
+	track *webrtc.TrackLocalStaticSample,
+	sender *webrtc.RTPSender,
+	cfg config.Config,
+	onEncoderFailed func(error),
+) (*Stream, error) {
 	return &Stream{
-		sessionID: sessionID,
-		track:     track,
-		sender:    sender,
-		cfg:       cfg,
+		sessionID:       sessionID,
+		track:           track,
+		sender:          sender,
+		cfg:             cfg,
+		onEncoderFailed: onEncoderFailed,
 
 		// Не стартуем с ultra: это создаёт CPU/network spike в начале сессии.
 		// Более высокий профиль будет выбран позже только после устойчивой стабильности.
@@ -128,11 +137,6 @@ func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *w
 		keyframeReqCh: make(chan string, 1),
 	}, nil
 }
-
-//func initialProfileForGeometry(g Geometry) Profile {
-//	// TEST ONLY: fixed profile.
-//	return lowProfile24()
-//}
 
 func initialProfileForGeometry(g Geometry) Profile {
 	pixels := g.Width * g.Height
@@ -148,6 +152,21 @@ func initialProfileForGeometry(g Geometry) Profile {
 		// Даже для 4K/ultrawide не стартуем с ultra.
 		// Ultra можно получить позже только через стабильный upgrade.
 		return highProfile24()
+	}
+}
+
+func fixedProfileForQuality(quality string) (Profile, bool) {
+	switch strings.ToLower(strings.TrimSpace(quality)) {
+	case "low":
+		return lowProfile24(), true
+	case "medium":
+		return mediumProfile24(), true
+	case "high":
+		return highProfile24(), true
+	case "ultra":
+		return ultraProfile24(), true
+	default:
+		return Profile{}, false
 	}
 }
 
@@ -169,9 +188,14 @@ func (s *Stream) Start() error {
 	s.cancel = cancel
 	s.geom = geom
 
-	// Стартовый профиль зависит от реальной площади захвата.
-	// Это дешевле, чем всегда стартовать с ultra, особенно на 4K/ultrawide.
-	s.profile = initialProfileForGeometry(geom)
+	if fixed, ok := fixedProfileForQuality(s.cfg.VideoQuality); ok {
+		s.profile = fixed
+		logger.RDAgent.Infof("Using fixed video quality profile: quality=%s profile=%+v", s.cfg.VideoQuality, s.profile)
+	} else {
+		// Стартовый профиль зависит от реальной площади захвата.
+		// Это дешевле, чем всегда стартовать с ultra, особенно на 4K/ultrawide.
+		s.profile = initialProfileForGeometry(geom)
+	}
 
 	if err := s.startFFmpegLocked(); err != nil {
 		cancel()
@@ -192,7 +216,12 @@ func (s *Stream) Start() error {
 	go s.watchGeometry(ctx)
 	go s.watchDesktop(ctx)
 	go s.watchFrameStall(ctx)
-	go s.watchAdaptation(ctx)
+
+	if _, fixed := fixedProfileForQuality(s.cfg.VideoQuality); !fixed {
+		go s.watchAdaptation(ctx)
+	} else {
+		logger.RDAgent.Infof("Network adaptation disabled for fixed video quality: %s", s.cfg.VideoQuality)
+	}
 
 	logger.RDAgent.Infof("Desktop stream started: %dx%d @ %dfps desktop=%s",
 		s.geom.Width, s.geom.Height, s.profile.FPS, s.desktopName)
@@ -697,6 +726,18 @@ func (s *Stream) forwardEncodedVideo(stdout io.Reader, profile Profile) {
 	}
 }
 
+func (s *Stream) notifyEncoderFailed(err error) {
+	if err == nil || s.onEncoderFailed == nil {
+		return
+	}
+
+	if s.cfg.VideoEncoder != "h264_mf" && s.cfg.VideoEncoder != "av1_mf" {
+		return
+	}
+
+	go s.onEncoderFailed(err)
+}
+
 func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 	ivf, _, err := ivfreader.NewWith(stdout)
 	if err != nil {
@@ -717,9 +758,8 @@ func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 
 		frame, _, err := ivf.ParseNextFrame()
 		if err != nil {
-			if err != io.EOF && s.ctx.Err() == nil {
-				logger.RDAgent.Errorf("read IVF video frame stopped: codec=%s error=%v", s.cfg.VideoCodec, err)
-			}
+			logger.RDAgent.Errorf("read IVF video frame stopped: codec=%s error=%v", s.cfg.VideoCodec, err)
+			s.notifyEncoderFailed(err)
 			return
 		}
 
@@ -824,9 +864,8 @@ func (s *Stream) forwardH264AnnexB(stdout io.Reader, profile Profile) {
 
 		accessUnit, err := reader.ReadAccessUnit()
 		if err != nil {
-			if err != io.EOF && s.ctx.Err() == nil {
-				logger.RDAgent.Errorf("read H264 access unit stopped: %v", err)
-			}
+			logger.RDAgent.Errorf("read IVF video frame stopped: codec=%s error=%v", s.cfg.VideoCodec, err)
+			s.notifyEncoderFailed(err)
 			return
 		}
 
@@ -1319,29 +1358,29 @@ func (s *Stream) readRTCP(ctx context.Context) {
 
 func lowProfile24() Profile {
 	return Profile{
-		FPS:          16,
-		BitrateKbps:  700,
-		MaxrateKbps:  900,
-		BufsizeKbps:  900,
+		FPS:          15,
+		BitrateKbps:  900,
+		MaxrateKbps:  1100,
+		BufsizeKbps:  1100,
 		CRF:          38,
-		StaticThresh: 900,
+		StaticThresh: 800,
 	}
 }
 
 func mediumProfile24() Profile {
 	return Profile{
-		FPS:          20,
-		BitrateKbps:  1100,
-		MaxrateKbps:  1600,
-		BufsizeKbps:  344,
-		CRF:          36,
-		StaticThresh: 700,
+		FPS:          18,
+		BitrateKbps:  2200,
+		MaxrateKbps:  3400,
+		BufsizeKbps:  5800,
+		CRF:          34,
+		StaticThresh: 500,
 	}
 }
 
 func highProfile24() Profile {
 	return Profile{
-		FPS:          24,
+		FPS:          22,
 		BitrateKbps:  3800,
 		MaxrateKbps:  6000,
 		BufsizeKbps:  9000,

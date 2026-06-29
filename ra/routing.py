@@ -216,15 +216,18 @@ class CMDClient(service.sys_manager.ResourceManagement):
                 session_id = msg.get("id") or msg.get("session_id")
                 token = msg.get("token")
                 turn_config = msg.get("turn") or msg.get("turn_config") or {}
+                display_config = msg.get("display") or {}
 
                 service.logger.logger_service.info(
-                    f"Получена команда запуска rd-agent: type='{msg.get('type')}', session_id='{session_id}'"
+                    f"Получена команда запуска rd-agent: type='{msg.get('type')}', "
+                    f"session_id='{session_id}', display='{display_config}'"
                 )
 
                 self.rd_supervisor.start(
                     session_id=session_id,
                     token=token,
-                    turn_config=turn_config
+                    turn_config=turn_config,
+                    display_config=display_config,
                 )
                 return
 

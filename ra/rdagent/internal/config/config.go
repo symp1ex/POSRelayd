@@ -27,7 +27,7 @@ type Config struct {
 	InsecureSkipVerify bool
 
 	// Video pipeline.
-	// Default remains VP8/libvpx for compatibility with the existing viewer.
+	VideoQuality          string
 	VideoCodec            string
 	VideoEncoder          string
 	ForceKeyframeOnPLI    bool
@@ -57,11 +57,8 @@ func Parse(args []string) (Config, error) {
 	fs.IntVar(&cfg.LogRetainDays, "log-retain-days", 14, "How many days rotated logs are retained")
 
 	fs.BoolVar(&cfg.InsecureSkipVerify, "insecure-skip-verify", false, "Disable TLS certificate verification for wss")
-	//
-	//fs.StringVar(&cfg.VideoCodec, "video-codec", "vp8", "Video codec: vp8 or av1")
-	//fs.StringVar(&cfg.VideoEncoder, "video-encoder", "libvpx", "Video encoder: libvpx or av1_mf")
-	//fs.StringVar(&cfg.VideoCodec, "video-codec", "av1", "Video codec: vp8 or av1")
-	//fs.StringVar(&cfg.VideoEncoder, "video-encoder", "av1_mf", "Video encoder: libvpx or av1_mf")
+
+	fs.StringVar(&cfg.VideoQuality, "video-quality", "auto", "Video quality: auto, low, medium, high or ultra")
 	fs.StringVar(&cfg.VideoCodec, "video-codec", "h264", "Video codec: vp8, h264 or av1")
 	fs.StringVar(&cfg.VideoEncoder, "video-encoder", "h264_mf", "Video encoder: libvpx, h264_mf or av1_mf")
 	fs.BoolVar(&cfg.ForceKeyframeOnPLI, "force-keyframe-on-pli", true, "Force fast keyframe recovery on RTCP PLI/FIR")
@@ -138,6 +135,12 @@ func (c Config) Validate() error {
 	}
 	if c.LogRetainDays <= 0 {
 		return fmt.Errorf("--log-retain-days must be positive")
+	}
+
+	switch c.VideoQuality {
+	case "auto", "low", "medium", "high", "ultra":
+	default:
+		return fmt.Errorf("--video-quality must be one of: auto, low, medium, high, ultra")
 	}
 
 	switch c.VideoCodec {

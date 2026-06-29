@@ -12,7 +12,7 @@ import (
 	"rdagent/internal/logger"
 )
 
-const version = "0.2.4.0"
+const version = "0.2.4.2"
 
 func main() {
 	cfg, err := config.Parse(os.Args[1:])
