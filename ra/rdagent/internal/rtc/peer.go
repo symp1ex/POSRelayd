@@ -103,76 +103,11 @@ func (p *Peer) HandleOffer(sdp string) error {
 		return fmt.Errorf("set local answer: %w", err)
 	}
 
-	return p.handleOfferWithCodecFallbackLocked(sdp, false)
-
-	logger.RDAgent.Info("WebRTC answer sent")
-	return nil
-}
-
-func (p *Peer) handleOfferWithCodecFallbackLocked(sdp string, fallbackUsed bool) error {
-	pc, err := p.newPeerConnectionLocked()
-	if err != nil {
-		return err
-	}
-
-	offer := webrtc.SessionDescription{
-		Type: webrtc.SDPTypeOffer,
-		SDP:  sdp,
-	}
-
-	if err := pc.SetRemoteDescription(offer); err != nil {
-		_ = pc.Close()
-		p.pc = nil
-		return fmt.Errorf("set remote offer: %w", err)
-	}
-
-	if len(p.pendingRemoteICE) > 0 {
-		pending := p.pendingRemoteICE
-		p.pendingRemoteICE = nil
-
-		logger.RDAgent.Infof("Applying queued remote ICE candidates: count=%d", len(pending))
-
-		for _, init := range pending {
-			if err := p.addRemoteICELocked(init); err != nil {
-				_ = pc.Close()
-				p.pc = nil
-				return fmt.Errorf("add queued remote ice: %w", err)
-			}
-		}
-	}
-
-	answer, err := pc.CreateAnswer(nil)
-	if err != nil {
-		_ = pc.Close()
-		p.pc = nil
-		return fmt.Errorf("create answer: %w", err)
-	}
-
-	if err := pc.SetLocalDescription(answer); err != nil {
-		_ = pc.Close()
-		p.pc = nil
-		return fmt.Errorf("set local answer: %w", err)
-	}
-
 	if p.video != nil {
 		if err := p.video.Start(); err != nil {
 			_ = pc.Close()
 			p.pc = nil
 			p.video = nil
-
-			if !fallbackUsed && usesHardwareVideoEncoder(p.cfg) {
-				logger.RDAgent.Warnf(
-					"Hardware video encoder failed, fallback to VP8/libvpx: codec=%s encoder=%s error=%v",
-					p.cfg.VideoCodec,
-					p.cfg.VideoEncoder,
-					err,
-				)
-
-				applyVP8Fallback(&p.cfg)
-				p.seenRemote = make(map[string]struct{})
-				return p.handleOfferWithCodecFallbackLocked(sdp, true)
-			}
-
 			return fmt.Errorf("start desktop stream: %w", err)
 		}
 	}
@@ -188,13 +123,7 @@ func (p *Peer) handleOfferWithCodecFallbackLocked(sdp string, fallbackUsed bool)
 		return fmt.Errorf("send rd_answer: %w", err)
 	}
 
-	logger.RDAgent.Infof(
-		"WebRTC answer sent: codec=%s encoder=%s fallback_used=%t",
-		p.cfg.VideoCodec,
-		p.cfg.VideoEncoder,
-		fallbackUsed,
-	)
-
+	logger.RDAgent.Info("WebRTC answer sent")
 	return nil
 }
 
@@ -405,15 +334,7 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 		return nil, fmt.Errorf("add desktop track: %w", err)
 	}
 
-	stream, err := desktop.NewStream(
-		p.sessionID,
-		videoTrack,
-		rtpSender,
-		p.cfg,
-		func(err error) {
-			p.handleEncoderFailure(err)
-		},
-	)
+	stream, err := desktop.NewStream(p.sessionID, videoTrack, rtpSender, p.cfg)
 	if err != nil {
 		_ = pc.Close()
 		p.pc = nil
@@ -423,43 +344,6 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 
 	logger.RDAgent.Info("PeerConnection with desktop video track created")
 	return pc, nil
-}
-
-func (p *Peer) handleEncoderFailure(err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if !usesHardwareVideoEncoder(p.cfg) {
-		return
-	}
-
-	logger.RDAgent.Warnf(
-		"Hardware encoder failed after start, switching next negotiation to VP8/libvpx: codec=%s encoder=%s error=%v",
-		p.cfg.VideoCodec,
-		p.cfg.VideoEncoder,
-		err,
-	)
-
-	applyVP8Fallback(&p.cfg)
-
-	if p.video != nil {
-		p.video.Stop()
-		p.video = nil
-	}
-
-	if p.pc != nil {
-		_ = p.pc.Close()
-		p.pc = nil
-	}
-
-	_ = p.sender.Send(protocol.Message{
-		Type:      protocol.MessageRDError,
-		ID:        p.sessionID,
-		SessionID: p.sessionID,
-		ClientID:  p.clientID,
-		Target:    protocol.RDTargetAdmin,
-		Error:     "encoder_failed_fallback_to_vp8",
-	})
 }
 
 func videoMimeType(codec string) string {
@@ -473,15 +357,6 @@ func videoMimeType(codec string) string {
 	default:
 		return webrtc.MimeTypeVP8
 	}
-}
-
-func usesHardwareVideoEncoder(cfg config.Config) bool {
-	return cfg.VideoEncoder == "h264_mf" || cfg.VideoEncoder == "av1_mf"
-}
-
-func applyVP8Fallback(cfg *config.Config) {
-	cfg.VideoCodec = "vp8"
-	cfg.VideoEncoder = "libvpx"
 }
 
 func (p *Peer) scheduleDisconnectedClose(pc *webrtc.PeerConnection, delay time.Duration) {

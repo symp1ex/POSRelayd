@@ -97,8 +97,6 @@ type Stream struct {
 	sender    *webrtc.RTPSender
 	cfg       config.Config
 
-	onEncoderFailed func(error)
-
 	mu          sync.Mutex
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -116,20 +114,12 @@ type Stream struct {
 	lastKeyframeForce time.Time
 }
 
-func NewStream(
-	sessionID string,
-	track *webrtc.TrackLocalStaticSample,
-	sender *webrtc.RTPSender,
-	cfg config.Config,
-	onEncoderFailed func(error),
-) (*Stream, error) {
+func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *webrtc.RTPSender, cfg config.Config) (*Stream, error) {
 	return &Stream{
-		sessionID:       sessionID,
-		track:           track,
-		sender:          sender,
-		cfg:             cfg,
-		onEncoderFailed: onEncoderFailed,
-
+		sessionID: sessionID,
+		track:     track,
+		sender:    sender,
+		cfg:       cfg,
 		// Не стартуем с ultra: это создаёт CPU/network spike в начале сессии.
 		// Более высокий профиль будет выбран позже только после устойчивой стабильности.
 		profile: mediumProfile24(),
@@ -726,18 +716,6 @@ func (s *Stream) forwardEncodedVideo(stdout io.Reader, profile Profile) {
 	}
 }
 
-func (s *Stream) notifyEncoderFailed(err error) {
-	if err == nil || s.onEncoderFailed == nil {
-		return
-	}
-
-	if s.cfg.VideoEncoder != "h264_mf" && s.cfg.VideoEncoder != "av1_mf" {
-		return
-	}
-
-	go s.onEncoderFailed(err)
-}
-
 func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 	ivf, _, err := ivfreader.NewWith(stdout)
 	if err != nil {
@@ -758,8 +736,9 @@ func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 
 		frame, _, err := ivf.ParseNextFrame()
 		if err != nil {
-			logger.RDAgent.Errorf("read IVF video frame stopped: codec=%s error=%v", s.cfg.VideoCodec, err)
-			s.notifyEncoderFailed(err)
+			if err != io.EOF && s.ctx.Err() == nil {
+				logger.RDAgent.Errorf("read IVF video frame stopped: codec=%s error=%v", s.cfg.VideoCodec, err)
+			}
 			return
 		}
 
@@ -864,8 +843,7 @@ func (s *Stream) forwardH264AnnexB(stdout io.Reader, profile Profile) {
 
 		accessUnit, err := reader.ReadAccessUnit()
 		if err != nil {
-			logger.RDAgent.Errorf("read IVF video frame stopped: codec=%s error=%v", s.cfg.VideoCodec, err)
-			s.notifyEncoderFailed(err)
+			logger.RDAgent.Errorf("read H264 access unit stopped: %v", err)
 			return
 		}
 
@@ -1358,7 +1336,7 @@ func (s *Stream) readRTCP(ctx context.Context) {
 
 func lowProfile24() Profile {
 	return Profile{
-		FPS:          15,
+		FPS:          12,
 		BitrateKbps:  900,
 		MaxrateKbps:  1100,
 		BufsizeKbps:  1100,
@@ -1369,7 +1347,7 @@ func lowProfile24() Profile {
 
 func mediumProfile24() Profile {
 	return Profile{
-		FPS:          18,
+		FPS:          16,
 		BitrateKbps:  2200,
 		MaxrateKbps:  3400,
 		BufsizeKbps:  5800,
@@ -1380,7 +1358,7 @@ func mediumProfile24() Profile {
 
 func highProfile24() Profile {
 	return Profile{
-		FPS:          22,
+		FPS:          20,
 		BitrateKbps:  3800,
 		MaxrateKbps:  6000,
 		BufsizeKbps:  9000,
