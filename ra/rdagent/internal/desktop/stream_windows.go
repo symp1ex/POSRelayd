@@ -36,6 +36,10 @@ const (
 	smCYVirtualScreen = 79
 
 	monitorDefaultToNearest = 2
+
+	videoWriteSlowThreshold        = 120 * time.Millisecond
+	keyframeRecoveryCooldownFloor  = 3 * time.Second
+	keyframeRecoveryCongestionHold = 2 * time.Second
 )
 
 var (
@@ -81,13 +85,7 @@ type Profile struct {
 	MaxrateKbps int
 	BufsizeKbps int
 
-	// CRF включает constrained-quality поведение вместе с maxrate/bufsize.
-	// Для desktop-контента это лучше, чем жить только на target bitrate:
-	// текст/границы UI сохраняются лучше, а простые сцены сами снижают средний bitrate.
-	CRF int
-
-	// static-thresh позволяет libvpx пропускать почти неизменившиеся блоки.
-	// Для рабочего стола с большими статичными областями это снижает CPU/bitrate.
+	CRF          int
 	StaticThresh int
 }
 
@@ -115,6 +113,13 @@ type Stream struct {
 	pliCnt  atomic.Uint64
 	nackCnt atomic.Uint64
 
+	videoFramesSent         atomic.Uint64
+	videoBytesSent          atomic.Uint64
+	videoKeyframesSent      atomic.Uint64
+	videoSlowWrites         atomic.Uint64
+	videoMaxWriteNanos      atomic.Int64
+	videoLastSlowWriteNanos atomic.Int64
+
 	keyframeReqCh     chan keyframeRequest
 	lastKeyframeForce time.Time
 
@@ -130,9 +135,7 @@ func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *w
 		track:     track,
 		sender:    sender,
 		cfg:       cfg,
-		// Не стартуем с ultra: это создаёт CPU/network spike в начале сессии.
-		// Более высокий профиль будет выбран позже только после устойчивой стабильности.
-		profile: mediumProfile24(),
+		profile:   mediumProfile24(),
 
 		keyframeReqCh: make(chan keyframeRequest, 1),
 	}, nil
@@ -149,8 +152,6 @@ func initialProfileForGeometry(g Geometry) Profile {
 	case pixels <= 2560*1440:
 		return highProfile24()
 	default:
-		// Даже для 4K/ultrawide не стартуем с ultra.
-		// Ultra можно получить позже только через стабильный upgrade.
 		return highProfile24()
 	}
 }
@@ -192,8 +193,6 @@ func (s *Stream) Start() error {
 		s.profile = fixed
 		logger.RDAgent.Infof("Using fixed video quality profile: quality=%s profile=%+v", s.cfg.VideoQuality, s.profile)
 	} else {
-		// Стартовый профиль зависит от реальной площади захвата.
-		// Это дешевле, чем всегда стартовать с ultra, особенно на 4K/ultrawide.
 		s.profile = initialProfileForGeometry(geom)
 	}
 
@@ -216,6 +215,7 @@ func (s *Stream) Start() error {
 	go s.watchGeometry(ctx)
 	go s.watchDesktop(ctx)
 	go s.watchFrameStall(ctx)
+	go s.watchLatencyStats(ctx)
 
 	if _, fixed := fixedProfileForQuality(s.cfg.VideoQuality); !fixed {
 		go s.watchAdaptation(ctx)
@@ -249,7 +249,6 @@ func currentGeometry() (Geometry, error) {
 		return geom, nil
 	}
 
-	// Fallback: старое поведение, если WinAPI не смог определить монитор.
 	x, _, _ := procGetSystemMetrics.Call(smXVirtualScreen)
 	y, _, _ := procGetSystemMetrics.Call(smYVirtualScreen)
 	w, _, _ := procGetSystemMetrics.Call(smCXVirtualScreen)
@@ -270,7 +269,6 @@ func currentGeometry() (Geometry, error) {
 }
 
 func activeMonitorGeometry() (Geometry, bool) {
-	// 1. Предпочитаем монитор активного окна.
 	hwnd, _, _ := procGetForegroundWindow.Call()
 	if hwnd != 0 {
 		monitor, _, _ := procMonitorFromWindow.Call(hwnd, monitorDefaultToNearest)
@@ -278,11 +276,8 @@ func activeMonitorGeometry() (Geometry, bool) {
 			return geom, true
 		}
 	}
-
-	// 2. Fallback: монитор под курсором.
 	var pt winPoint
 	if ret, _, _ := procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt))); ret != 0 {
-		// POINT передаётся в MonitorFromPoint как два int32, упакованные в uintptr.
 		point := uintptr(uint32(pt.X)) | (uintptr(uint32(pt.Y)) << 32)
 		monitor, _, _ := procMonitorFromPoint.Call(point, monitorDefaultToNearest)
 		if geom, ok := monitorGeometry(monitor); ok {
@@ -349,8 +344,12 @@ func (s *Stream) ffmpegArgsH264MF() []string {
 		"-scenario", s.cfg.MFScenario,
 		"-hw_encoding", boolToFFmpegInt(s.cfg.MFHWEncoding),
 
+		"-flags", "+low_delay",
+		"-bf", "0",
 		"-g", strconv.Itoa(p.FPS),
 		"-b:v", fmt.Sprintf("%dk", p.BitrateKbps),
+		"-maxrate", fmt.Sprintf("%dk", p.MaxrateKbps),
+		"-bufsize", fmt.Sprintf("%dk", p.BufsizeKbps),
 
 		"-f", "h264",
 		"pipe:1",
@@ -401,14 +400,11 @@ func (s *Stream) ffmpegArgsVP8Libvpx() []string {
 		"-g", strconv.Itoa(p.FPS*2),
 		"-keyint_min", strconv.Itoa(p.FPS),
 
-		// Constrained-quality: CRF задаёт желаемое качество,
-		// maxrate/bufsize ограничивают пики bitrate.
 		"-crf", strconv.Itoa(p.CRF),
 		"-b:v", fmt.Sprintf("%dk", p.BitrateKbps),
 		"-maxrate", fmt.Sprintf("%dk", p.MaxrateKbps),
 		"-bufsize", fmt.Sprintf("%dk", p.BufsizeKbps),
 
-		// Оптимизация для почти статичного desktop-контента.
 		"-static-thresh", strconv.Itoa(p.StaticThresh),
 
 		"-f", "ivf",
@@ -424,21 +420,19 @@ func (s *Stream) ffmpegArgsAV1MF() []string {
 	args := s.ffmpegInputArgs()
 
 	args = append(args,
-		// gdigrab отдает RGB/BGRA-like frames, а MediaFoundation AV1 encoder
-		// обычно не принимает их напрямую. NV12 — самый совместимый формат
-		// для hardware video encoders на Windows.
 		"-vf", "hwdownload,format=bgra,format=nv12",
 		"-pix_fmt", "nv12",
 
 		"-c:v", "av1_mf",
 
-		// Эти опции зависят от конкретной сборки FFmpeg и драйвера.
-		// Перед включением в production проверить:
-		// ffmpeg -hide_banner -h encoder=av1_mf
 		"-hw_encoding", boolToFFmpegInt(s.cfg.MFHWEncoding),
 
+		"-flags", "+low_delay",
+		"-bf", "0",
 		"-g", strconv.Itoa(p.FPS*2),
 		"-b:v", fmt.Sprintf("%dk", p.BitrateKbps),
+		"-maxrate", fmt.Sprintf("%dk", p.MaxrateKbps),
+		"-bufsize", fmt.Sprintf("%dk", p.BufsizeKbps),
 
 		"-f", "ivf",
 		"pipe:1",
@@ -825,10 +819,7 @@ func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 			return
 		}
 
-		s.markFrameSent()
-		if isIVFKeyframe(s.cfg.VideoCodec, frame) {
-			s.observeOutgoingKeyframe(s.cfg.VideoCodec, len(frame))
-		}
+		keyframe := isIVFKeyframe(s.cfg.VideoCodec, frame)
 
 		frameCount++
 		if time.Since(lastLog) >= 2*time.Second {
@@ -837,10 +828,7 @@ func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 			lastLog = time.Now()
 		}
 
-		if err := s.track.WriteSample(media.Sample{
-			Data:     frame,
-			Duration: frameDuration,
-		}); err != nil && err != io.ErrClosedPipe {
+		if err := s.writeVideoSample(frame, frameDuration, s.cfg.VideoCodec, keyframe); err != nil {
 			logger.RDAgent.Errorf("write IVF video sample failed: %v", err)
 			return
 		}
@@ -937,10 +925,7 @@ func (s *Stream) forwardH264AnnexB(stdout io.Reader, profile Profile) {
 			continue
 		}
 
-		s.markFrameSent()
-		if h264AnnexBHasIDR(accessUnit) {
-			s.observeOutgoingKeyframe("h264", len(accessUnit))
-		}
+		keyframe := h264AnnexBHasIDR(accessUnit)
 
 		frameCount++
 		if time.Since(lastLog) >= 2*time.Second {
@@ -949,14 +934,59 @@ func (s *Stream) forwardH264AnnexB(stdout io.Reader, profile Profile) {
 			lastLog = time.Now()
 		}
 
-		if err := s.track.WriteSample(media.Sample{
-			Data:     accessUnit,
-			Duration: frameDuration,
-		}); err != nil && err != io.ErrClosedPipe {
+		if err := s.writeVideoSample(accessUnit, frameDuration, "h264", keyframe); err != nil {
 			logger.RDAgent.Errorf("write H264 video sample failed: %v", err)
 			return
 		}
 	}
+}
+
+func (s *Stream) writeVideoSample(data []byte, duration time.Duration, codec string, keyframe bool) error {
+	s.markFrameSent()
+	if keyframe {
+		s.videoKeyframesSent.Add(1)
+		s.observeOutgoingKeyframe(codec, len(data))
+	}
+
+	start := time.Now()
+	err := s.track.WriteSample(media.Sample{
+		Data:     data,
+		Duration: duration,
+	})
+	elapsed := time.Since(start)
+
+	s.recordVideoWrite(len(data), elapsed)
+
+	if err != nil && err != io.ErrClosedPipe {
+		return err
+	}
+	return nil
+}
+
+func (s *Stream) recordVideoWrite(size int, elapsed time.Duration) {
+	s.videoFramesSent.Add(1)
+	s.videoBytesSent.Add(uint64(size))
+
+	nanos := elapsed.Nanoseconds()
+	for {
+		current := s.videoMaxWriteNanos.Load()
+		if nanos <= current || s.videoMaxWriteNanos.CompareAndSwap(current, nanos) {
+			break
+		}
+	}
+
+	if elapsed >= videoWriteSlowThreshold {
+		s.videoSlowWrites.Add(1)
+		s.videoLastSlowWriteNanos.Store(time.Now().UnixNano())
+	}
+}
+
+func (s *Stream) videoBackpressureActive() bool {
+	last := s.videoLastSlowWriteNanos.Load()
+	if last == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, last)) < keyframeRecoveryCongestionHold
 }
 
 func (s *Stream) markFrameSent() {
@@ -1292,26 +1322,72 @@ func (s *Stream) watchFrameStall(ctx context.Context) {
 	}
 }
 
+func (s *Stream) watchLatencyStats(ctx context.Context) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case <-ticker.C:
+			frames := s.videoFramesSent.Swap(0)
+			bytes := s.videoBytesSent.Swap(0)
+			keyframes := s.videoKeyframesSent.Swap(0)
+			slowWrites := s.videoSlowWrites.Swap(0)
+			maxWrite := time.Duration(s.videoMaxWriteNanos.Swap(0))
+
+			if frames == 0 {
+				continue
+			}
+
+			if slowWrites > 0 {
+				logger.RDAgent.Warnf(
+					"Desktop video latency pressure: frames=%d bytes=%d keyframes=%d slow_writes=%d max_write=%s profile=%+v",
+					frames,
+					bytes,
+					keyframes,
+					slowWrites,
+					maxWrite,
+					s.currentProfileSnapshot(),
+				)
+				continue
+			}
+
+			logger.RDAgent.Debugf(
+				"Desktop video latency stats: frames=%d bytes=%d keyframes=%d max_write=%s profile=%+v",
+				frames,
+				bytes,
+				keyframes,
+				maxWrite,
+				s.currentProfileSnapshot(),
+			)
+		}
+	}
+}
+
+func (s *Stream) currentProfileSnapshot() Profile {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.profile
+}
+
 func (s *Stream) watchAdaptation(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	lastRestart := time.Now()
 
 	const (
-		// Downgrade должен происходить раньше, чтобы не накапливать freeze/burst.
-		downCooldown = 8 * time.Second
+		downCooldown = 4 * time.Second
 
-		// Upgrade только после длительной стабильности.
 		upCooldown = 120 * time.Second
 
-		// NACK — главный сигнал потерь.
-		highNackThreshold = uint64(80)
+		highNackThreshold = uint64(30)
 
-		// Более ранний downgrade по REMB.
 		rembDropRatio = 0.90
 
-		// Для upgrade требуем запас REMB относительно maxrate.
 		upgradeREMBHeadroom = 1.35
 	)
 
@@ -1336,8 +1412,9 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 
 			hasLoss := nack >= highNackThreshold
 			hasLowREMB := remb > 0 && remb < uint64(float64(currentBps)*rembDropRatio)
+			hasVideoPressure := s.videoBackpressureActive()
 
-			if !hasLoss && !hasLowREMB {
+			if !hasLoss && !hasLowREMB && !hasVideoPressure {
 				stableTicks++
 
 				logger.RDAgent.Debugf(
@@ -1349,8 +1426,7 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 					stableTicks,
 				)
 
-				// 24 тика по 5 секунд = 120 секунд устойчивой стабильности.
-				if stableTicks < 24 {
+				if stableTicks < 60 {
 					continue
 				}
 
@@ -1363,7 +1439,6 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 					continue
 				}
 
-				// Upgrade разрешаем только если REMB даёт запас над maxrate нового профиля.
 				if remb > 0 {
 					required := uint64(float64(target.MaxrateKbps*1000) * upgradeREMBHeadroom)
 					if remb < required {
@@ -1398,19 +1473,18 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 
 			if time.Since(lastRestart) < downCooldown {
 				logger.RDAgent.Debugf(
-					"Network issue detected but downgrade skipped by cooldown: profile=%+v remb=%d pli=%d nack=%d",
+					"Network or latency issue detected but downgrade skipped by cooldown: profile=%+v remb=%d pli=%d nack=%d video_pressure=%t",
 					current,
 					remb,
 					pli,
 					nack,
+					hasVideoPressure,
 				)
 				continue
 			}
 
 			target := nextLowerProfile(current)
 
-			// Если REMB уже ниже low maxrate — сразу падаем на low.
-			// Используем функцию профиля, чтобы не потерять CRF/static-thresh.
 			if remb > 0 && remb < uint64(lowProfile24().MaxrateKbps*1000) {
 				target = lowProfile24()
 			}
@@ -1422,12 +1496,13 @@ func (s *Stream) watchAdaptation(ctx context.Context) {
 			lastRestart = time.Now()
 
 			logger.RDAgent.Infof(
-				"Network issue, downgrade bitrate: current=%+v target=%+v remb=%d pli=%d nack=%d",
+				"Network or latency issue, downgrade bitrate: current=%+v target=%+v remb=%d pli=%d nack=%d video_pressure=%t",
 				current,
 				target,
 				remb,
 				pli,
 				nack,
+				hasVideoPressure,
 			)
 
 			s.restart("network issue, bitrate downgrade", geom, target)
@@ -1448,14 +1523,18 @@ func (s *Stream) requestKeyframeRecovery(reason string) {
 	select {
 	case s.keyframeReqCh <- req:
 	default:
-		// Coalesce PLI/FIR bursts. Одного pending refresh достаточно.
 	}
 }
 
 func (s *Stream) watchKeyframeRequests(ctx context.Context) {
 	cooldown := time.Duration(s.cfg.PLIKeyframeCooldownMs) * time.Millisecond
-	if cooldown <= 0 {
-		cooldown = 750 * time.Millisecond
+	if cooldown < keyframeRecoveryCooldownFloor {
+		logger.RDAgent.Infof(
+			"PLI/FIR keyframe cooldown raised for latency safety: configured=%s effective=%s",
+			cooldown,
+			keyframeRecoveryCooldownFloor,
+		)
+		cooldown = keyframeRecoveryCooldownFloor
 	}
 
 	for {
@@ -1464,6 +1543,14 @@ func (s *Stream) watchKeyframeRequests(ctx context.Context) {
 			return
 
 		case req := <-s.keyframeReqCh:
+			if s.videoBackpressureActive() {
+				logger.RDAgent.Warnf(
+					"PLI/FIR keyframe recovery skipped during video latency pressure: reason=%s",
+					req.reason,
+				)
+				continue
+			}
+
 			s.mu.Lock()
 			since := time.Since(s.lastKeyframeForce)
 			if !s.lastKeyframeForce.IsZero() && since < cooldown {
@@ -1490,6 +1577,14 @@ func (s *Stream) forceKeyframeOnPLI(req keyframeRequest) {
 	defer s.mu.Unlock()
 
 	if s.ctx == nil {
+		return
+	}
+
+	if s.videoBackpressureActive() {
+		logger.RDAgent.Warnf(
+			"PLI/FIR keyframe command suppressed by active video latency pressure: reason=%s",
+			req.reason,
+		)
 		return
 	}
 
@@ -1579,6 +1674,20 @@ func (s *Stream) watchForcedKeyframeObservation(ctx context.Context, seq uint64,
 			time.Since(sentAt),
 		)
 		s.mu.Unlock()
+		return
+	}
+
+	if s.videoBackpressureActive() {
+		s.pendingKeyframeSentAt = time.Time{}
+		s.pendingKeyframeReason = ""
+		s.mu.Unlock()
+
+		logger.RDAgent.Warnf(
+			"Forced keyframe not observed before timeout, refresh skipped during video latency pressure: seq=%d reason=%s since_command=%s",
+			seq,
+			reason,
+			time.Since(sentAt),
+		)
 		return
 	}
 
@@ -1682,7 +1791,7 @@ func lowProfile24() Profile {
 		FPS:          16,
 		BitrateKbps:  900,
 		MaxrateKbps:  1100,
-		BufsizeKbps:  1100,
+		BufsizeKbps:  650,
 		CRF:          38,
 		StaticThresh: 800,
 	}
@@ -1693,7 +1802,7 @@ func mediumProfile24() Profile {
 		FPS:          20,
 		BitrateKbps:  1500,
 		MaxrateKbps:  2900,
-		BufsizeKbps:  4800,
+		BufsizeKbps:  1200,
 		CRF:          34,
 		StaticThresh: 600,
 	}
@@ -1704,7 +1813,7 @@ func highProfile24() Profile {
 		FPS:          24,
 		BitrateKbps:  2800,
 		MaxrateKbps:  5000,
-		BufsizeKbps:  7000,
+		BufsizeKbps:  1800,
 		CRF:          32,
 		StaticThresh: 500,
 	}
@@ -1715,7 +1824,7 @@ func ultraProfile24() Profile {
 		FPS:          24,
 		BitrateKbps:  5000,
 		MaxrateKbps:  8000,
-		BufsizeKbps:  9500,
+		BufsizeKbps:  2600,
 		CRF:          30,
 		StaticThresh: 350,
 	}
@@ -1723,12 +1832,15 @@ func ultraProfile24() Profile {
 
 func nextLowerProfile(p Profile) Profile {
 	switch {
-	case p.BitrateKbps > 3500:
+	case p.BitrateKbps >= ultraProfile24().BitrateKbps:
 		return highProfile24()
-	case p.BitrateKbps > 2700:
+
+	case p.BitrateKbps >= highProfile24().BitrateKbps:
 		return mediumProfile24()
-	case p.BitrateKbps > 1300:
+
+	case p.BitrateKbps >= mediumProfile24().BitrateKbps:
 		return lowProfile24()
+
 	default:
 		return p
 	}
@@ -1736,12 +1848,15 @@ func nextLowerProfile(p Profile) Profile {
 
 func nextHigherProfile(p Profile) Profile {
 	switch {
-	case p.BitrateKbps < 2800:
+	case p.BitrateKbps < mediumProfile24().BitrateKbps:
 		return mediumProfile24()
-	case p.BitrateKbps < 3500:
+
+	case p.BitrateKbps < highProfile24().BitrateKbps:
 		return highProfile24()
-	case p.BitrateKbps < 5000:
+
+	case p.BitrateKbps < ultraProfile24().BitrateKbps:
 		return ultraProfile24()
+
 	default:
 		return p
 	}

@@ -6,6 +6,8 @@ date/
 gui/
 updater/
 bin/
+.codegraph/
+.skills/
 uuid
 ad
 main-temp.py
