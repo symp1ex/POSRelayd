@@ -91,6 +91,11 @@ type Profile struct {
 	StaticThresh int
 }
 
+type keyframeRequest struct {
+	reason     string
+	receivedAt time.Time
+}
+
 type Stream struct {
 	sessionID string
 	track     *webrtc.TrackLocalStaticSample
@@ -110,8 +115,13 @@ type Stream struct {
 	pliCnt  atomic.Uint64
 	nackCnt atomic.Uint64
 
-	keyframeReqCh     chan string
+	keyframeReqCh     chan keyframeRequest
 	lastKeyframeForce time.Time
+
+	pendingKeyframeSeq    uint64
+	pendingKeyframePLIAt  time.Time
+	pendingKeyframeSentAt time.Time
+	pendingKeyframeReason string
 }
 
 func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *webrtc.RTPSender, cfg config.Config) (*Stream, error) {
@@ -124,7 +134,7 @@ func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *w
 		// Более высокий профиль будет выбран позже только после устойчивой стабильности.
 		profile: mediumProfile24(),
 
-		keyframeReqCh: make(chan string, 1),
+		keyframeReqCh: make(chan keyframeRequest, 1),
 	}, nil
 }
 
@@ -464,15 +474,52 @@ func ffmpegPath() string {
 }
 
 type ffmpegProcess struct {
+	mu       sync.Mutex
 	hProcess windows.Handle
 	hThread  windows.Handle
+	pid      uint32
+	stdin    *os.File
 	stdout   *os.File
 	stderr   *os.File
+}
+
+func (p *ffmpegProcess) PID() uint32 {
+	if p == nil {
+		return 0
+	}
+	return p.pid
+}
+
+func (p *ffmpegProcess) WriteControlLine(line string) error {
+	if p == nil {
+		return fmt.Errorf("ffmpeg process is nil")
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.stdin == nil {
+		return fmt.Errorf("ffmpeg stdin is not available")
+	}
+
+	if _, err := p.stdin.WriteString(line + "\n"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (p *ffmpegProcess) KillAndWait() {
 	if p == nil {
 		return
+	}
+
+	p.mu.Lock()
+	stdin := p.stdin
+	p.stdin = nil
+	p.mu.Unlock()
+
+	if stdin != nil {
+		_ = stdin.Close()
 	}
 
 	if p.hProcess != 0 {
@@ -519,6 +566,15 @@ func startFFmpegOnDesktop(
 		return nil, nil, nil, fmt.Errorf("stderr pipe: %w", err)
 	}
 
+	stdinR, stdinW, err := makeChildStdinPipe()
+	if err != nil {
+		_ = windows.CloseHandle(stdoutR)
+		_ = windows.CloseHandle(stdoutW)
+		_ = windows.CloseHandle(stderrR)
+		_ = windows.CloseHandle(stderrW)
+		return nil, nil, nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+
 	cmdline := commandLine(bin, args)
 
 	si := new(windows.StartupInfo)
@@ -527,7 +583,7 @@ func startFFmpegOnDesktop(
 	si.ShowWindow = windows.SW_HIDE
 	si.StdOutput = stdoutW
 	si.StdErr = stderrW
-	si.StdInput = windows.InvalidHandle
+	si.StdInput = stdinR
 	si.Desktop = windows.StringToUTF16Ptr(desktopFullName)
 
 	var pi windows.ProcessInformation
@@ -549,19 +605,24 @@ func startFFmpegOnDesktop(
 
 	_ = windows.CloseHandle(stdoutW)
 	_ = windows.CloseHandle(stderrW)
+	_ = windows.CloseHandle(stdinR)
 
 	if err != nil {
 		_ = windows.CloseHandle(stdoutR)
 		_ = windows.CloseHandle(stderrR)
+		_ = windows.CloseHandle(stdinW)
 		return nil, nil, nil, fmt.Errorf("CreateProcess desktop=%s failed: %w", desktopFullName, err)
 	}
 
+	stdinFile := os.NewFile(uintptr(stdinW), "ffmpeg-stdin")
 	stdoutFile := os.NewFile(uintptr(stdoutR), "ffmpeg-stdout")
 	stderrFile := os.NewFile(uintptr(stderrR), "ffmpeg-stderr")
 
 	proc := &ffmpegProcess{
 		hProcess: pi.Process,
 		hThread:  pi.Thread,
+		pid:      pi.ProcessId,
+		stdin:    stdinFile,
 		stdout:   stdoutFile,
 		stderr:   stderrFile,
 	}
@@ -587,6 +648,27 @@ func makeInheritablePipe() (windows.Handle, windows.Handle, error) {
 	}
 
 	if err := windows.SetHandleInformation(read, windows.HANDLE_FLAG_INHERIT, 0); err != nil {
+		_ = windows.CloseHandle(read)
+		_ = windows.CloseHandle(write)
+		return 0, 0, err
+	}
+
+	return read, write, nil
+}
+
+func makeChildStdinPipe() (windows.Handle, windows.Handle, error) {
+	var sa windows.SecurityAttributes
+	sa.Length = uint32(unsafe.Sizeof(sa))
+	sa.InheritHandle = 1
+
+	var read windows.Handle
+	var write windows.Handle
+
+	if err := windows.CreatePipe(&read, &write, &sa, 0); err != nil {
+		return 0, 0, err
+	}
+
+	if err := windows.SetHandleInformation(write, windows.HANDLE_FLAG_INHERIT, 0); err != nil {
 		_ = windows.CloseHandle(read)
 		_ = windows.CloseHandle(write)
 		return 0, 0, err
@@ -677,9 +759,10 @@ func (s *Stream) startFFmpegLocked() error {
 	s.ffmpeg = proc
 
 	logger.RDAgent.Infof(
-		"FFmpeg process started on desktop: name=%s full=%s",
+		"FFmpeg process started on desktop: name=%s full=%s pid=%d",
 		desktop.Name(),
 		desktopFullName,
+		proc.PID(),
 	)
 
 	go func() {
@@ -743,6 +826,9 @@ func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 		}
 
 		s.markFrameSent()
+		if isIVFKeyframe(s.cfg.VideoCodec, frame) {
+			s.observeOutgoingKeyframe(s.cfg.VideoCodec, len(frame))
+		}
 
 		frameCount++
 		if time.Since(lastLog) >= 2*time.Second {
@@ -852,6 +938,9 @@ func (s *Stream) forwardH264AnnexB(stdout io.Reader, profile Profile) {
 		}
 
 		s.markFrameSent()
+		if h264AnnexBHasIDR(accessUnit) {
+			s.observeOutgoingKeyframe("h264", len(accessUnit))
+		}
 
 		frameCount++
 		if time.Since(lastLog) >= 2*time.Second {
@@ -874,6 +963,170 @@ func (s *Stream) markFrameSent() {
 	s.mu.Lock()
 	s.lastFrameAt = time.Now()
 	s.mu.Unlock()
+}
+
+func (s *Stream) observeOutgoingKeyframe(codec string, size int) {
+	now := time.Now()
+
+	s.mu.Lock()
+	seq := s.pendingKeyframeSeq
+	pliAt := s.pendingKeyframePLIAt
+	sentAt := s.pendingKeyframeSentAt
+	reason := s.pendingKeyframeReason
+	pending := !sentAt.IsZero()
+	if pending {
+		s.pendingKeyframePLIAt = time.Time{}
+		s.pendingKeyframeSentAt = time.Time{}
+		s.pendingKeyframeReason = ""
+	}
+	s.mu.Unlock()
+
+	if pending {
+		logger.RDAgent.Infof(
+			"Forced keyframe observed: seq=%d reason=%s codec=%s size=%d pli_to_keyframe=%s command_to_keyframe=%s",
+			seq,
+			reason,
+			codec,
+			size,
+			now.Sub(pliAt),
+			now.Sub(sentAt),
+		)
+		return
+	}
+
+	logger.RDAgent.Debugf("Outgoing keyframe observed: codec=%s size=%d", codec, size)
+}
+
+func isIVFKeyframe(codec string, frame []byte) bool {
+	switch codec {
+	case "vp8":
+		return len(frame) > 0 && frame[0]&0x01 == 0
+	case "av1":
+		return isAV1Keyframe(frame)
+	default:
+		return false
+	}
+}
+
+func h264AnnexBHasIDR(accessUnit []byte) bool {
+	for i := 0; i+4 < len(accessUnit); i++ {
+		if accessUnit[i] != 0 || accessUnit[i+1] != 0 {
+			continue
+		}
+
+		startCodeLen := 0
+		if accessUnit[i+2] == 1 {
+			startCodeLen = 3
+		} else if i+3 < len(accessUnit) && accessUnit[i+2] == 0 && accessUnit[i+3] == 1 {
+			startCodeLen = 4
+		}
+
+		if startCodeLen == 0 {
+			continue
+		}
+
+		nalStart := i + startCodeLen
+		if nalStart < len(accessUnit) && accessUnit[nalStart]&0x1F == 5 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isAV1Keyframe(frame []byte) bool {
+	for offset := 0; offset < len(frame); {
+		header := frame[offset]
+		offset++
+
+		obuType := (header >> 3) & 0x0F
+		hasExtension := header&0x04 != 0
+		hasSize := header&0x02 != 0
+
+		if hasExtension {
+			if offset >= len(frame) {
+				return false
+			}
+			offset++
+		}
+
+		if !hasSize {
+			return false
+		}
+
+		payloadSize, n := readLEB128(frame[offset:])
+		if n <= 0 {
+			return false
+		}
+		offset += n
+
+		if payloadSize < 0 || offset+payloadSize > len(frame) {
+			return false
+		}
+
+		payload := frame[offset : offset+payloadSize]
+		offset += payloadSize
+
+		if obuType == 3 || obuType == 6 {
+			return av1FrameHeaderIsKeyframe(payload)
+		}
+	}
+
+	return false
+}
+
+func readLEB128(data []byte) (int, int) {
+	value := 0
+	for i := 0; i < len(data) && i < 8; i++ {
+		value |= int(data[i]&0x7F) << (i * 7)
+		if data[i]&0x80 == 0 {
+			return value, i + 1
+		}
+	}
+	return -1, 0
+}
+
+func av1FrameHeaderIsKeyframe(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+
+	br := bitReader{data: payload}
+
+	showExistingFrame, ok := br.readBit()
+	if !ok || showExistingFrame == 1 {
+		return false
+	}
+
+	frameType, ok := br.readBits(2)
+	return ok && frameType == 0
+}
+
+type bitReader struct {
+	data []byte
+	bit  int
+}
+
+func (r *bitReader) readBit() (uint, bool) {
+	if r.bit >= len(r.data)*8 {
+		return 0, false
+	}
+
+	v := (r.data[r.bit/8] >> uint(7-r.bit%8)) & 1
+	r.bit++
+	return uint(v), true
+}
+
+func (r *bitReader) readBits(n int) (uint, bool) {
+	var out uint
+	for i := 0; i < n; i++ {
+		bit, ok := r.readBit()
+		if !ok {
+			return 0, false
+		}
+		out = (out << 1) | bit
+	}
+	return out, true
 }
 
 func (s *Stream) stopFFmpegLocked() {
@@ -1187,8 +1440,13 @@ func (s *Stream) requestKeyframeRecovery(reason string) {
 		return
 	}
 
+	req := keyframeRequest{
+		reason:     reason,
+		receivedAt: time.Now(),
+	}
+
 	select {
-	case s.keyframeReqCh <- reason:
+	case s.keyframeReqCh <- req:
 	default:
 		// Coalesce PLI/FIR bursts. Одного pending refresh достаточно.
 	}
@@ -1205,7 +1463,7 @@ func (s *Stream) watchKeyframeRequests(ctx context.Context) {
 		case <-ctx.Done():
 			return
 
-		case reason := <-s.keyframeReqCh:
+		case req := <-s.keyframeReqCh:
 			s.mu.Lock()
 			since := time.Since(s.lastKeyframeForce)
 			if !s.lastKeyframeForce.IsZero() && since < cooldown {
@@ -1213,7 +1471,7 @@ func (s *Stream) watchKeyframeRequests(ctx context.Context) {
 
 				logger.RDAgent.Debugf(
 					"PLI/FIR keyframe recovery skipped by cooldown: reason=%s since=%s cooldown=%s",
-					reason,
+					req.reason,
 					since,
 					cooldown,
 				)
@@ -1222,12 +1480,12 @@ func (s *Stream) watchKeyframeRequests(ctx context.Context) {
 			s.lastKeyframeForce = time.Now()
 			s.mu.Unlock()
 
-			s.forceKeyframeOnPLI(reason)
+			s.forceKeyframeOnPLI(req)
 		}
 	}
 }
 
-func (s *Stream) forceKeyframeOnPLI(reason string) {
+func (s *Stream) forceKeyframeOnPLI(req keyframeRequest) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1235,37 +1493,120 @@ func (s *Stream) forceKeyframeOnPLI(reason string) {
 		return
 	}
 
-	geom := s.geom
-	profile := s.profile
-
 	switch s.cfg.VideoEncoder {
-	case "libvpx":
-		s.refreshEncoderLocked(
-			"PLI/FIR recovery: refreshing VP8 encoder without profile downgrade",
-			reason,
-			geom,
-			profile,
-		)
-
-	case "h264_mf":
-		s.refreshEncoderLocked(
-			"PLI/FIR recovery: refreshing H264 encoder without profile downgrade",
-			reason,
-			geom,
-			profile,
-		)
-
-	case "av1_mf":
-		s.refreshEncoderLocked(
-			"PLI/FIR recovery: refreshing AV1 encoder without profile downgrade",
-			reason,
-			geom,
-			profile,
-		)
+	case "libvpx", "h264_mf", "av1_mf":
+		if err := s.requestFFmpegKeyframeLocked(req); err != nil {
+			logger.RDAgent.Warnf(
+				"PLI/FIR keyframe command failed, refreshing encoder as fallback: reason=%s error=%v",
+				req.reason,
+				err,
+			)
+			s.refreshEncoderLocked(
+				"PLI/FIR recovery fallback: refreshing encoder without profile downgrade",
+				req.reason,
+				s.geom,
+				s.profile,
+			)
+		}
 
 	default:
 		logger.RDAgent.Warnf("PLI/FIR recovery ignored: unsupported encoder=%s", s.cfg.VideoEncoder)
 	}
+}
+
+func (s *Stream) requestFFmpegKeyframeLocked(req keyframeRequest) error {
+	if s.ffmpeg == nil {
+		return fmt.Errorf("ffmpeg is not running")
+	}
+
+	sentAt := time.Now()
+	if err := s.ffmpeg.WriteControlLine("force_keyframe"); err != nil {
+		return err
+	}
+
+	s.pendingKeyframeSeq++
+	seq := s.pendingKeyframeSeq
+	s.pendingKeyframePLIAt = req.receivedAt
+	s.pendingKeyframeSentAt = sentAt
+	s.pendingKeyframeReason = req.reason
+	pid := s.ffmpeg.PID()
+	codec := s.cfg.VideoCodec
+	encoder := s.cfg.VideoEncoder
+	profile := s.profile
+	ctx := s.ctx
+
+	logger.RDAgent.Infof(
+		"PLI/FIR keyframe recovery command sent: seq=%d reason=%s pli_to_command=%s pid=%d encoder=%s codec=%s profile=%+v",
+		seq,
+		req.reason,
+		sentAt.Sub(req.receivedAt),
+		pid,
+		encoder,
+		codec,
+		profile,
+	)
+
+	go s.watchForcedKeyframeObservation(ctx, seq, sentAt, req.reason, codec)
+	return nil
+}
+
+func (s *Stream) watchForcedKeyframeObservation(ctx context.Context, seq uint64, sentAt time.Time, reason string, codec string) {
+	timeout := 2500 * time.Millisecond
+	if codec == "av1" {
+		timeout = 3500 * time.Millisecond
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+
+	s.mu.Lock()
+	if s.ctx != ctx || s.pendingKeyframeSeq != seq || s.pendingKeyframeSentAt.IsZero() {
+		s.mu.Unlock()
+		return
+	}
+
+	if codec == "av1" {
+		logger.RDAgent.Warnf(
+			"Forced AV1 keyframe not observed before timeout: seq=%d reason=%s since_command=%s; keeping FFmpeg alive because AV1 keyframe detection is best-effort",
+			seq,
+			reason,
+			time.Since(sentAt),
+		)
+		s.mu.Unlock()
+		return
+	}
+
+	geom := s.geom
+	profile := s.profile
+	s.pendingKeyframeSentAt = time.Time{}
+	s.pendingKeyframeReason = ""
+	s.mu.Unlock()
+
+	logger.RDAgent.Warnf(
+		"Forced keyframe not observed before timeout, refreshing encoder as fallback: seq=%d reason=%s since_command=%s",
+		seq,
+		reason,
+		time.Since(sentAt),
+	)
+
+	s.refreshEncoder("PLI/FIR recovery fallback: forced keyframe not observed", reason, geom, profile)
+}
+
+func (s *Stream) refreshEncoder(logPrefix string, reason string, geom Geometry, profile Profile) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.ctx == nil {
+		return
+	}
+
+	s.refreshEncoderLocked(logPrefix, reason, geom, profile)
 }
 
 func (s *Stream) refreshEncoderLocked(logPrefix string, reason string, geom Geometry, profile Profile) {
@@ -1318,10 +1659,12 @@ func (s *Stream) readRTCP(ctx context.Context) {
 			switch p := pkt.(type) {
 			case *rtcp.PictureLossIndication:
 				s.pliCnt.Add(1)
+				logger.RDAgent.Info("RTCP PLI received")
 				s.requestKeyframeRecovery("rtcp pli")
 
 			case *rtcp.FullIntraRequest:
 				s.pliCnt.Add(1)
+				logger.RDAgent.Info("RTCP FIR received")
 				s.requestKeyframeRecovery("rtcp fir")
 
 			case *rtcp.TransportLayerNack:
@@ -1336,7 +1679,7 @@ func (s *Stream) readRTCP(ctx context.Context) {
 
 func lowProfile24() Profile {
 	return Profile{
-		FPS:          12,
+		FPS:          16,
 		BitrateKbps:  900,
 		MaxrateKbps:  1100,
 		BufsizeKbps:  1100,
@@ -1347,44 +1690,44 @@ func lowProfile24() Profile {
 
 func mediumProfile24() Profile {
 	return Profile{
-		FPS:          16,
-		BitrateKbps:  2200,
-		MaxrateKbps:  3400,
-		BufsizeKbps:  5800,
+		FPS:          18,
+		BitrateKbps:  1500,
+		MaxrateKbps:  2900,
+		BufsizeKbps:  4800,
 		CRF:          34,
-		StaticThresh: 500,
+		StaticThresh: 600,
 	}
 }
 
 func highProfile24() Profile {
 	return Profile{
 		FPS:          20,
-		BitrateKbps:  3800,
-		MaxrateKbps:  6000,
-		BufsizeKbps:  9000,
-		CRF:          30,
-		StaticThresh: 350,
+		BitrateKbps:  2800,
+		MaxrateKbps:  5000,
+		BufsizeKbps:  7000,
+		CRF:          32,
+		StaticThresh: 500,
 	}
 }
 
 func ultraProfile24() Profile {
 	return Profile{
 		FPS:          24,
-		BitrateKbps:  6000,
-		MaxrateKbps:  9000,
-		BufsizeKbps:  13500,
-		CRF:          28,
-		StaticThresh: 250,
+		BitrateKbps:  5000,
+		MaxrateKbps:  8000,
+		BufsizeKbps:  9500,
+		CRF:          30,
+		StaticThresh: 350,
 	}
 }
 
 func nextLowerProfile(p Profile) Profile {
 	switch {
-	case p.BitrateKbps > 4500:
+	case p.BitrateKbps > 3500:
 		return highProfile24()
-	case p.BitrateKbps > 2800:
+	case p.BitrateKbps > 2700:
 		return mediumProfile24()
-	case p.BitrateKbps > 1600:
+	case p.BitrateKbps > 1300:
 		return lowProfile24()
 	default:
 		return p
@@ -1395,9 +1738,9 @@ func nextHigherProfile(p Profile) Profile {
 	switch {
 	case p.BitrateKbps < 2800:
 		return mediumProfile24()
-	case p.BitrateKbps < 4500:
+	case p.BitrateKbps < 3500:
 		return highProfile24()
-	case p.BitrateKbps < 7000:
+	case p.BitrateKbps < 5000:
 		return ultraProfile24()
 	default:
 		return p
