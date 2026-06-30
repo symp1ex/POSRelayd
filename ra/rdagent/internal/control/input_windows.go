@@ -102,8 +102,13 @@ type inputRequest struct {
 
 type inputWorker struct {
 	req  chan inputRequest
+	wake chan struct{}
 	stop chan struct{}
 	done chan struct{}
+
+	mouseMu             sync.Mutex
+	pendingMouseMove    inputRequest
+	hasPendingMouseMove bool
 }
 
 func completeInputRequest(req inputRequest, err error) {
@@ -153,7 +158,8 @@ var setCursorPos = func(x, y int) error {
 
 func newInputWorker() *inputWorker {
 	w := &inputWorker{
-		req:  make(chan inputRequest, 1024),
+		req:  make(chan inputRequest, 64),
+		wake: make(chan struct{}, 1),
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
@@ -190,6 +196,27 @@ func (w *inputWorker) run() {
 		select {
 		case <-w.stop:
 			return
+		default:
+		}
+
+		select {
+		case req := <-w.req:
+			desktop = w.processRequest(desktop, req)
+			continue
+		default:
+		}
+
+		if req, ok := w.takePendingMouseMove(); ok {
+			desktop = w.processRequest(desktop, req)
+			continue
+		}
+
+		select {
+		case <-w.stop:
+			return
+
+		case <-w.wake:
+			continue
 
 		case <-ticker.C:
 			if desktop == nil {
@@ -257,6 +284,40 @@ func (w *inputWorker) run() {
 	}
 }
 
+func (w *inputWorker) processRequest(desktop *winsta.BoundDesktop, req inputRequest) *winsta.BoundDesktop {
+	if desktop == nil {
+		newDesktop, err := bindInputDesktop("input-worker-lazy-bind")
+		if err != nil {
+			completeInputRequest(req, fmt.Errorf("input worker bind desktop: %w", err))
+			return desktop
+		}
+		desktop = newDesktop
+		logger.RDAgent.Infof("Input worker lazy-bound to desktop=%s", desktop.Name())
+	}
+
+	err := w.handleRequest(desktop, req)
+	if err != nil {
+		newDesktop, bindErr := winsta.RebindCurrentThreadToInputDesktop("input-worker-error-rebind", desktop)
+		if bindErr != nil {
+			completeInputRequest(req, fmt.Errorf("%w; rebind failed: %v", err, bindErr))
+			return desktop
+		}
+
+		logger.RDAgent.Warnf(
+			"Input worker rebound after injection error: old=%s new=%s original_error=%v",
+			desktop.Name(),
+			newDesktop.Name(),
+			err,
+		)
+
+		desktop = newDesktop
+		err = w.handleRequest(desktop, req)
+	}
+
+	completeInputRequest(req, err)
+	return desktop
+}
+
 func (w *inputWorker) handleRequest(desktop *winsta.BoundDesktop, req inputRequest) error {
 	switch req.op {
 	case inputOpMouseMove:
@@ -309,8 +370,23 @@ func (w *inputWorker) call(req inputRequest) error {
 	}
 }
 
+func (w *inputWorker) post(req inputRequest) error {
+	req.reply = nil
+
+	select {
+	case w.req <- req:
+		return nil
+	case <-w.done:
+		return fmt.Errorf("input worker is stopped")
+	}
+}
+
 func (w *inputWorker) tryPost(req inputRequest) bool {
 	req.reply = nil
+
+	if req.op == inputOpMouseMove {
+		return w.postLatestMouseMove(req)
+	}
 
 	select {
 	case w.req <- req:
@@ -320,6 +396,40 @@ func (w *inputWorker) tryPost(req inputRequest) bool {
 	default:
 		return false
 	}
+}
+
+func (w *inputWorker) postLatestMouseMove(req inputRequest) bool {
+	select {
+	case <-w.done:
+		return false
+	default:
+	}
+
+	w.mouseMu.Lock()
+	w.pendingMouseMove = req
+	w.hasPendingMouseMove = true
+	w.mouseMu.Unlock()
+
+	select {
+	case w.wake <- struct{}{}:
+	default:
+	}
+
+	return true
+}
+
+func (w *inputWorker) takePendingMouseMove() (inputRequest, bool) {
+	w.mouseMu.Lock()
+	defer w.mouseMu.Unlock()
+
+	if !w.hasPendingMouseMove {
+		return inputRequest{}, false
+	}
+
+	req := w.pendingMouseMove
+	w.pendingMouseMove = inputRequest{}
+	w.hasPendingMouseMove = false
+	return req, true
 }
 
 func (w *inputWorker) close() {
@@ -455,7 +565,7 @@ func (i *Injector) MouseButton(x, y float64, button string, down bool) error {
 		return nil
 	}
 
-	err := i.worker.call(inputRequest{
+	err := i.worker.post(inputRequest{
 		op:     inputOpMouseButton,
 		x:      x,
 		y:      y,
@@ -489,7 +599,7 @@ func (i *Injector) MouseWheel(x, y float64, deltaX, deltaY int32) error {
 		return nil
 	}
 
-	err := i.worker.call(inputRequest{
+	err := i.worker.post(inputRequest{
 		op:     inputOpMouseWheel,
 		x:      x,
 		y:      y,
@@ -545,7 +655,7 @@ func (i *Injector) KeyVK(vk uint16, down bool) error {
 	}
 	i.mu.Unlock()
 
-	err := i.worker.call(inputRequest{
+	err := i.worker.post(inputRequest{
 		op:   inputOpKey,
 		vk:   vk,
 		down: down,

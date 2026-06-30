@@ -1,20 +1,21 @@
-# build-onefile-ffmpeg.ps1
-# Minimal single-file FFmpeg for POSRelayd rdagent:
+# build-shared-ffmpeg.ps1
+# Minimal shared/DLL FFmpeg build for POSRelayd rdagent:
 #   Supports lavfi/ddagrab desktop capture and project encoders:
-#   VP8 via libvpx -> IVF -> pipe
+#   VP8 via libvpx_vp8 -> IVF -> pipe
 #   H.264 via MediaFoundation h264_mf -> raw h264 -> pipe
 #   AV1 via MediaFoundation av1_mf -> IVF -> pipe
 #
 # Output:
-#   One standalone ffmpeg.exe is copied next to this script.
+#   ffmpeg.exe and all non-system DLL dependencies are copied into:
+#     .\ffmpeg-shared\
 #
 # Important:
 #   This script DOES NOT run pacman -Sy or pacman -Suy.
 #   It does not refresh MSYS2 package databases.
 #
-# Note about LGPL:
-#   This builds a statically linked FFmpeg executable. If you distribute it,
-#   make sure your distribution process satisfies the LGPL requirements for FFmpeg.
+# Notes:
+#   This is intentionally NOT a one-file/static build.
+#   Keep the copied DLL files next to ffmpeg.exe when distributing/running it.
 
 $ErrorActionPreference = "Stop"
 
@@ -23,7 +24,7 @@ $MsysRoot   = "C:\msys64"
 $BashExe    = Join-Path $MsysRoot "usr\bin\bash.exe"
 
 $WorkDir    = Join-Path $ScriptDir "_ffmpeg_build"
-$OutDir     = $ScriptDir
+$OutDir     = Join-Path $ScriptDir "ffmpeg-shared"
 
 $MsysUrl    = "https://github.com/msys2/msys2-installer/releases/latest/download/msys2-x86_64-latest.exe"
 $MsysSetup  = Join-Path $WorkDir "msys2-x86_64-latest.exe"
@@ -32,10 +33,11 @@ $FfmpegVer  = "8.1.2"
 $FfmpegUrl  = "https://ffmpeg.org/releases/ffmpeg-$FfmpegVer.tar.xz"
 $FfmpegArc  = Join-Path $WorkDir "ffmpeg-$FfmpegVer.tar.xz"
 $FfmpegDir  = Join-Path $WorkDir "ffmpeg-$FfmpegVer"
-$InstallDir = Join-Path $WorkDir "install-onefile"
+$InstallDir = Join-Path $WorkDir "install-shared"
 
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 function Write-Step {
     param([string]$Text)
@@ -95,6 +97,7 @@ function Invoke-MSYS2Script {
     $env:WIN_FFMPEG_DIR  = $FfmpegDir
     $env:WIN_INSTALL_DIR = $InstallDir
     $env:WIN_FFMPEG_VER  = $FfmpegVer
+    $env:WIN_MSYS_ROOT   = $MsysRoot
 
     & $BashExe --login $ScriptPath
 
@@ -120,10 +123,10 @@ Install-MSYS2-IfMissing
 
 Write-Step "Writing MSYS2 build scripts"
 
-$CheckScript   = Join-Path $WorkDir "00_check_packages.sh"
-$ExtractScript = Join-Path $WorkDir "01_extract_ffmpeg.sh"
-$BuildScript   = Join-Path $WorkDir "02_build_ffmpeg_onefile.sh"
-$VerifyScript  = Join-Path $WorkDir "03_verify_onefile.sh"
+$CheckScript   = Join-Path $WorkDir "00_check_packages_shared.sh"
+$ExtractScript = Join-Path $WorkDir "01_extract_ffmpeg_shared.sh"
+$BuildScript   = Join-Path $WorkDir "02_build_ffmpeg_shared.sh"
+$CopyScript    = Join-Path $WorkDir "03_copy_shared_runtime.sh"
 
 Save-TextUtf8NoBom -Path $CheckScript -Text @'
 #!/usr/bin/env bash
@@ -133,7 +136,7 @@ echo "Checking required build tools without refreshing package databases..."
 
 missing=0
 
-for cmd in gcc make pkg-config nasm tar xz strip objdump; do
+for cmd in gcc make pkg-config nasm tar xz strip objdump ldd; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "missing command: $cmd"
     missing=1
@@ -145,20 +148,8 @@ if ! pkg-config --exists vpx; then
   missing=1
 fi
 
-# For one-file output we need a real static libvpx archive, not only import DLL libs.
-if ! pkg-config --static --libs vpx >/dev/null 2>&1; then
-  echo "pkg-config cannot resolve static vpx libs"
-  missing=1
-fi
-
-vpx_static_lib="$(pkg-config --variable=libdir vpx 2>/dev/null || true)/libvpx.a"
-if [ ! -f "$vpx_static_lib" ]; then
-  echo "missing static library: $vpx_static_lib"
-  missing=1
-fi
-
 if [ "$missing" = "0" ]; then
-  echo "All required build tools and static libraries are already installed."
+  echo "All required build tools and shared-library dependencies are already installed."
   exit 0
 fi
 
@@ -176,11 +167,11 @@ pacman -S --needed --noconfirm \
   mingw-w64-ucrt-x86_64-libvpx
 
 echo ""
-echo "Re-checking required build tools and static libraries..."
+echo "Re-checking required build tools and shared-library dependencies..."
 
 missing=0
 
-for cmd in gcc make pkg-config nasm tar xz strip objdump; do
+for cmd in gcc make pkg-config nasm tar xz strip objdump ldd; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "missing command after install attempt: $cmd"
     missing=1
@@ -192,26 +183,15 @@ if ! pkg-config --exists vpx; then
   missing=1
 fi
 
-if ! pkg-config --static --libs vpx >/dev/null 2>&1; then
-  echo "pkg-config cannot resolve static vpx libs after install attempt"
-  missing=1
-fi
-
-vpx_static_lib="$(pkg-config --variable=libdir vpx 2>/dev/null || true)/libvpx.a"
-if [ ! -f "$vpx_static_lib" ]; then
-  echo "missing static library after install attempt: $vpx_static_lib"
-  missing=1
-fi
-
 if [ "$missing" != "0" ]; then
   echo ""
-  echo "Required packages/static libraries are still missing." >&2
+  echo "Required packages are still missing." >&2
   echo "Install these packages manually in MSYS2 UCRT64, then run this script again:" >&2
   echo "  pacman -S --needed git make pkgconf diffutils tar xz mingw-w64-ucrt-x86_64-cc mingw-w64-ucrt-x86_64-binutils mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-nasm mingw-w64-ucrt-x86_64-libvpx" >&2
   exit 1
 fi
 
-echo "All required build tools and static libraries are installed."
+echo "All required build tools and shared-library dependencies are installed."
 exit 0
 '@
 
@@ -255,20 +235,18 @@ make distclean >/dev/null 2>&1 || true
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 
-# The key one-file switches are:
-#   --enable-static --disable-shared
-#   --pkg-config-flags=--static
-#   --extra-ldexeflags=-static
-# They force FFmpeg and libvpx to be linked into ffmpeg.exe instead of emitted as DLLs.
+# Shared/DLL build:
+#   --enable-shared creates av*.dll/sw*.dll next to ffmpeg.exe during install.
+#   --disable-static prevents everything from being packed into one executable.
+#   No --pkg-config-flags=--static and no -static linker flags are used.
 ./configure \
   --prefix="$INSTALL_DIR" \
   --target-os=mingw32 \
   --arch=x86_64 \
-  --enable-static \
-  --disable-shared \
-  --pkg-config-flags="--static" \
-  --extra-ldflags="-static" \
-  --extra-ldexeflags="-static" \
+  --disable-static \
+  --enable-shared \
+  --enable-gpl \
+  --enable-gpl \
   --disable-autodetect \
   --disable-debug \
   --disable-doc \
@@ -308,11 +286,11 @@ echo "Configured programs:"
 grep -E '^CONFIG_FFMPEG=' config.h || true
 
 echo ""
-echo "Configured libvpx encoder:"
+echo "Configured encoders:"
 grep -E 'CONFIG_(LIBVPX_VP8|H264_MF|AV1_MF)_ENCODER' config.h || true
 
- echo ""
-echo "Configured filters/libs needed for bgra -> yuv420p:"
+echo ""
+echo "Configured filters/libs needed for capture and conversion:"
 grep -E 'CONFIG_(DDAGRAB|HWDOWNLOAD|SCALE|FORMAT|NULL)_FILTER|CONFIG_SWSCALE|CONFIG_(D3D11VA|DXVA2|MEDIAFOUNDATION)' config.h || true
 
 make -j"$(nproc)" V=0
@@ -339,68 +317,135 @@ if [ ! -f "$INSTALL_DIR/bin/ffmpeg.exe" ]; then
 fi
 
 strip "$INSTALL_DIR/bin/ffmpeg.exe" 2>/dev/null || true
+strip "$INSTALL_DIR/bin"/*.dll 2>/dev/null || true
 
 exit 0
 '@
 
-Save-TextUtf8NoBom -Path $VerifyScript -Text @'
+Save-TextUtf8NoBom -Path $CopyScript -Text @'
 #!/usr/bin/env bash
 set -euo pipefail
 
 INSTALL_DIR="$(cygpath -u "$WIN_INSTALL_DIR")"
 OUT_DIR="$(cygpath -u "$WIN_OUT_DIR")"
+UCRT_BIN="/ucrt64/bin"
 
 mkdir -p "$OUT_DIR"
+rm -f "$OUT_DIR"/*.exe "$OUT_DIR"/*.dll 2>/dev/null || true
 
 if [ ! -f "$INSTALL_DIR/bin/ffmpeg.exe" ]; then
   echo "ffmpeg.exe was not found: $INSTALL_DIR/bin/ffmpeg.exe" >&2
   exit 1
 fi
 
+echo ""
+echo "Copying FFmpeg executable and FFmpeg DLLs..."
 cp -f "$INSTALL_DIR/bin/ffmpeg.exe" "$OUT_DIR/ffmpeg.exe"
+cp -f "$INSTALL_DIR/bin"/*.dll "$OUT_DIR/" 2>/dev/null || true
 
-# Remove stale DLLs from older dynamic builds in this output directory.
-# This is intentionally conservative: it removes only DLLs that are normally
-# produced/copied by the previous FFmpeg build script.
-rm -f "$OUT_DIR"/avcodec-*.dll \
-      "$OUT_DIR"/avdevice-*.dll \
-      "$OUT_DIR"/avfilter-*.dll \
-      "$OUT_DIR"/avformat-*.dll \
-      "$OUT_DIR"/avutil-*.dll \
-      "$OUT_DIR"/postproc-*.dll \
-      "$OUT_DIR"/swresample-*.dll \
-      "$OUT_DIR"/swscale-*.dll \
-      "$OUT_DIR"/libvpx*.dll \
-      "$OUT_DIR"/libgcc_s_*.dll \
-      "$OUT_DIR"/libstdc++-*.dll \
-      "$OUT_DIR"/libwinpthread-*.dll 2>/dev/null || true
+is_system_dll() {
+  local name
+  name="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+  case "$name" in
+    kernel32.dll|user32.dll|gdi32.dll|advapi32.dll|shell32.dll|ole32.dll|oleaut32.dll|uuid.dll|bcrypt.dll|secur32.dll|ws2_32.dll|mfplat.dll|mfuuid.dll|mf.dll|mfreadwrite.dll|strmiids.dll|d3d11.dll|dxgi.dll|dxva2.dll|dwmapi.dll|shlwapi.dll|setupapi.dll|cfgmgr32.dll|ntdll.dll|msvcrt.dll|ucrtbase.dll|api-ms-*.dll|ext-ms-*.dll)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+copy_one_dependency() {
+  local dll
+  local src
+  dll="$1"
+
+  if is_system_dll "$dll"; then
+    return 0
+  fi
+
+  if [ -f "$OUT_DIR/$dll" ]; then
+    return 0
+  fi
+
+  src=""
+  if [ -f "$INSTALL_DIR/bin/$dll" ]; then
+    src="$INSTALL_DIR/bin/$dll"
+  elif [ -f "$UCRT_BIN/$dll" ]; then
+    src="$UCRT_BIN/$dll"
+  elif command -v "$dll" >/dev/null 2>&1; then
+    src="$(command -v "$dll")"
+  fi
+
+  if [ -n "$src" ] && [ -f "$src" ]; then
+    echo "  $dll"
+    cp -f "$src" "$OUT_DIR/$dll"
+  else
+    echo "WARNING: could not find non-system DLL dependency: $dll" >&2
+  fi
+}
+
+list_imports() {
+  local file
+  file="$1"
+  objdump -p "$file" 2>/dev/null | sed -n 's/^[[:space:]]*DLL Name: //p' || true
+}
 
 echo ""
-echo "Checking imported DLLs for ffmpeg.exe..."
+echo "Resolving and copying non-system DLL dependencies..."
 
-imports="$(objdump -p "$OUT_DIR/ffmpeg.exe" | sed -n 's/^[[:space:]]*DLL Name: //p' || true)"
-printf '%s
-' "$imports"
+# Iterate because copied DLLs can import other DLLs.
+for pass in 1 2 3 4 5 6 7 8; do
+  changed=0
+  before_count="$(find "$OUT_DIR" -maxdepth 1 -type f \( -iname '*.exe' -o -iname '*.dll' \) | wc -l | tr -d ' ')"
 
-# For standalone distribution the real problem is importing MSYS2/MinGW/FFmpeg DLLs.
-# Windows system DLLs are expected and are not files you ship next to ffmpeg.exe.
-# This block intentionally fails only for known non-system runtime/media DLLs.
-bad_imports="$(printf '%s
-' "$imports" | grep -Ei '^(avcodec|avdevice|avfilter|avformat|avutil|postproc|swresample|swscale)-[0-9]+\.dll$|^lib(vpx|gcc|stdc\+\+|winpthread|bz2|brotli|iconv|intl|lzma|z|zstd|xml2|ssl|crypto).*\.dll$|^(zlib1|libzlib|libssp).*\.dll$' || true)"
+  while IFS= read -r bin; do
+    while IFS= read -r dll; do
+      [ -n "$dll" ] || continue
+      copy_one_dependency "$dll"
+    done < <(list_imports "$bin")
+  done < <(find "$OUT_DIR" -maxdepth 1 -type f \( -iname '*.exe' -o -iname '*.dll' \))
 
-if [ -n "$bad_imports" ]; then
+  after_count="$(find "$OUT_DIR" -maxdepth 1 -type f \( -iname '*.exe' -o -iname '*.dll' \) | wc -l | tr -d ' ')"
+  if [ "$after_count" != "$before_count" ]; then
+    changed=1
+  fi
+
+  if [ "$changed" = "0" ]; then
+    break
+  fi
+done
+
+echo ""
+echo "Final files copied to output directory:"
+find "$OUT_DIR" -maxdepth 1 -type f \( -iname '*.exe' -o -iname '*.dll' \) -printf '  %f\n' | sort
+
+echo ""
+echo "Checking for unresolved non-system DLL imports..."
+unresolved=0
+
+while IFS= read -r bin; do
+  while IFS= read -r dll; do
+    [ -n "$dll" ] || continue
+    if is_system_dll "$dll"; then
+      continue
+    fi
+    if [ ! -f "$OUT_DIR/$dll" ]; then
+      echo "  Missing for $(basename "$bin"): $dll" >&2
+      unresolved=1
+    fi
+  done < <(list_imports "$bin")
+done < <(find "$OUT_DIR" -maxdepth 1 -type f \( -iname '*.exe' -o -iname '*.dll' \))
+
+if [ "$unresolved" != "0" ]; then
   echo ""
-  echo "ERROR: ffmpeg.exe still imports non-system MSYS2/FFmpeg DLLs:" >&2
-  printf '%s
-' "$bad_imports" >&2
-  echo ""
-  echo "This means one dependency was linked dynamically." >&2
-  echo "Make sure MSYS2 UCRT64 has static libraries installed and configure used --pkg-config-flags=--static." >&2
+  echo "ERROR: Some non-system DLL dependencies were not copied." >&2
   exit 1
 fi
 
-echo "One-file check passed: no FFmpeg/libvpx/MSYS2 DLL imports were detected."
-echo "Note: Windows system DLL imports are normal and do not need to be bundled."
+echo "All non-system DLL dependencies that objdump can see were copied."
+echo "Windows system DLLs are expected to remain external."
 exit 0
 '@
 
@@ -420,11 +465,11 @@ if (-not (Test-Path $FfmpegDir)) {
     throw "FFmpeg source directory was not found after extract: $FfmpegDir"
 }
 
-Write-Step "Building minimal one-file FFmpeg"
+Write-Step "Building minimal shared/DLL FFmpeg"
 Invoke-MSYS2Script -ScriptPath $BuildScript
 
-Write-Step "Copying and verifying standalone ffmpeg.exe"
-Invoke-MSYS2Script -ScriptPath $VerifyScript
+Write-Step "Copying ffmpeg.exe and required DLLs"
+Invoke-MSYS2Script -ScriptPath $CopyScript
 
 Write-Step "Verifying resulting binary"
 
@@ -439,10 +484,6 @@ try {
     Write-Host ""
     Write-Host "Version:"
     .\ffmpeg.exe -hide_banner -version | Select-Object -First 5
-
-    Write-Host ""
-    Write-Host "Devices:"
-    .\ffmpeg.exe -hide_banner -devices | Select-String "gdigrab"
 
     Write-Host ""
     Write-Host "Encoders:"
@@ -460,11 +501,16 @@ try {
     Write-Host "Filters:"
     .\ffmpeg.exe -hide_banner -filters | Select-String "ddagrab|hwdownload|scale|format"
 
+    Write-Host ""
     Write-Host "Decoders:"
     .\ffmpeg.exe -hide_banner -decoders | Select-String "wrapped_avframe"
 
     Write-Host ""
-    Write-Host "Smoke test command:"
+    Write-Host "Copied files:"
+    Get-ChildItem -File | Sort-Object Name | Select-Object Name, Length | Format-Table -AutoSize
+
+    Write-Host ""
+    Write-Host "Smoke test commands:"
     Write-Host "  .\ffmpeg.exe -hide_banner -f lavfi -i ddagrab=framerate=1:video_size=320x240:draw_mouse=0 -t 1 -an -vf hwdownload,format=bgra -c:v libvpx_vp8 -f ivf pipe:1 > NUL"
     Write-Host "  .\ffmpeg.exe -hide_banner -f lavfi -i ddagrab=framerate=1:video_size=320x240:draw_mouse=0 -t 1 -an -vf hwdownload,format=bgra,format=nv12 -pix_fmt nv12 -c:v h264_mf -f h264 pipe:1 > NUL"
 }
@@ -474,8 +520,9 @@ finally {
 
 Write-Host ""
 Write-Host "Done."
-Write-Host ("Result standalone ffmpeg.exe: " + $ResultExe)
-Write-Host "No FFmpeg/libvpx/MSYS2 DLL files should be required next to it; Windows MediaFoundation/D3D system DLLs are expected."
+Write-Host ("Result shared/DLL FFmpeg directory: " + $OutDir)
+Write-Host "Keep ffmpeg.exe and all copied DLL files together."
+Write-Host "Windows MediaFoundation/D3D/system DLLs are expected and are not copied."
 Write-Host ""
 Write-Host "Note:"
 Write-Host "  If your Go project still uses '-c:v libvpx' and this FFmpeg build shows only 'libvpx_vp8',"

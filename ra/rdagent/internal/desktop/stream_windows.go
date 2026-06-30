@@ -454,7 +454,7 @@ func ffmpegPath() string {
 	}
 
 	if wd, err := os.Getwd(); err == nil {
-		local := filepath.Join(wd, "ffmpeg.exe")
+		local := filepath.Join(wd, "ffmpeg", "ffmpeg.exe")
 		if _, statErr := os.Stat(local); statErr == nil {
 			return local
 		}

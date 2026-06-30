@@ -5,9 +5,11 @@ logs/
 date/
 gui/
 updater/
+bin/
 uuid
 ad
 main-temp.py
 *.json
 *.exe
 *.txt
+.dll

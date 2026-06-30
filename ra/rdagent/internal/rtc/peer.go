@@ -172,7 +172,7 @@ func (p *Peer) addRemoteICELocked(init webrtc.ICECandidateInit) error {
 		return nil
 	}
 
-	key := fmt.Sprintf("%s|%s|%d", init.Candidate, init.SDPMid, init.SDPMLineIndex)
+	key := fmt.Sprintf("%s|%v|%v", init.Candidate, init.SDPMid, init.SDPMLineIndex)
 	if _, ok := p.seenRemote[key]; ok {
 		logger.RDAgent.Debug("Duplicate remote ICE candidate ignored")
 		return nil
@@ -260,7 +260,7 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 		}
 
 		logger.RDAgent.Debugf(
-			"Local ICE candidate sent: sdpMid=%s sdpMLineIndex=%v candidate=%s",
+			"Local ICE candidate sent: sdpMid=%v sdpMLineIndex=%v candidate=%s",
 			init.SDPMid,
 			init.SDPMLineIndex,
 			init.Candidate,
@@ -304,7 +304,7 @@ func (p *Peer) newPeerConnectionLocked() (*webrtc.PeerConnection, error) {
 	})
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		if dc.Label() != "control" {
+		if dc.Label() != "control" && dc.Label() != "motion" {
 			logger.RDAgent.Warnf("Unexpected DataChannel ignored: label=%s", dc.Label())
 			return
 		}
