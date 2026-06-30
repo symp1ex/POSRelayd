@@ -1690,7 +1690,7 @@ func lowProfile24() Profile {
 
 func mediumProfile24() Profile {
 	return Profile{
-		FPS:          18,
+		FPS:          20,
 		BitrateKbps:  1500,
 		MaxrateKbps:  2900,
 		BufsizeKbps:  4800,
@@ -1701,7 +1701,7 @@ func mediumProfile24() Profile {
 
 func highProfile24() Profile {
 	return Profile{
-		FPS:          20,
+		FPS:          24,
 		BitrateKbps:  2800,
 		MaxrateKbps:  5000,
 		BufsizeKbps:  7000,

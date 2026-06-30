@@ -61,7 +61,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.VideoQuality, "video-quality", "auto", "Video quality: auto, low, medium, high or ultra")
 	fs.StringVar(&cfg.VideoCodec, "video-codec", "h264", "Video codec: vp8, h264 or av1")
 	fs.StringVar(&cfg.VideoEncoder, "video-encoder", "h264_mf", "Video encoder: libvpx, h264_mf or av1_mf")
-	fs.BoolVar(&cfg.ForceKeyframeOnPLI, "force-keyframe-on-pli", true, "Force fast keyframe recovery on RTCP PLI/FIR")
+	fs.BoolVar(&cfg.ForceKeyframeOnPLI, "force-keyframe-on-pli", false, "Force fast keyframe recovery on RTCP PLI/FIR")
 	fs.IntVar(&cfg.PLIKeyframeCooldownMs, "pli-keyframe-cooldown-ms", 3000, "Minimum interval between forced keyframe recoveries")
 	fs.StringVar(&cfg.MFScenario, "mf-scenario", "display_remoting", "MediaFoundation encoder scenario")
 	fs.BoolVar(&cfg.MFHWEncoding, "mf-hw-encoding", true, "Enable MediaFoundation hardware encoding when supported")
