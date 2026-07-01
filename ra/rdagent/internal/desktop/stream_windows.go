@@ -343,6 +343,7 @@ func (s *Stream) ffmpegArgsH264MF() []string {
 		"-c:v", "h264_mf",
 		"-scenario", s.cfg.MFScenario,
 		"-hw_encoding", boolToFFmpegInt(s.cfg.MFHWEncoding),
+		"-rate_control", "ld_vbr",
 
 		"-flags", "+low_delay",
 		"-bf", "0",
@@ -396,8 +397,9 @@ func (s *Stream) ffmpegArgsVP8Libvpx() []string {
 		"-error-resilient", "1",
 		"-auto-alt-ref", "0",
 		"-quality", "realtime",
+		"-drop-threshold", "10",
 
-		"-g", strconv.Itoa(p.FPS*2),
+		"-g", strconv.Itoa(p.FPS),
 		"-keyint_min", strconv.Itoa(p.FPS),
 
 		"-crf", strconv.Itoa(p.CRF),
@@ -1788,7 +1790,7 @@ func (s *Stream) readRTCP(ctx context.Context) {
 
 func lowProfile24() Profile {
 	return Profile{
-		FPS:          16,
+		FPS:          24,
 		BitrateKbps:  900,
 		MaxrateKbps:  1100,
 		BufsizeKbps:  650,
@@ -1799,7 +1801,7 @@ func lowProfile24() Profile {
 
 func mediumProfile24() Profile {
 	return Profile{
-		FPS:          20,
+		FPS:          30,
 		BitrateKbps:  1500,
 		MaxrateKbps:  2900,
 		BufsizeKbps:  1200,
@@ -1810,7 +1812,7 @@ func mediumProfile24() Profile {
 
 func highProfile24() Profile {
 	return Profile{
-		FPS:          24,
+		FPS:          30,
 		BitrateKbps:  2800,
 		MaxrateKbps:  5000,
 		BufsizeKbps:  1800,
@@ -1821,7 +1823,7 @@ func highProfile24() Profile {
 
 func ultraProfile24() Profile {
 	return Profile{
-		FPS:          24,
+		FPS:          30,
 		BitrateKbps:  5000,
 		MaxrateKbps:  8000,
 		BufsizeKbps:  2600,
