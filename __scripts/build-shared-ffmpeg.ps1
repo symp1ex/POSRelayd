@@ -267,6 +267,7 @@ mkdir -p "$INSTALL_DIR"
   --enable-filter=scale \
   --enable-filter=format \
   --enable-filter=null \
+  --enable-filter=lutrgb \
   --enable-swscale \
   --enable-decoder=wrapped_avframe \
   --enable-encoder=libvpx_vp8 \
@@ -291,7 +292,7 @@ grep -E 'CONFIG_(LIBVPX_VP8|H264_MF|AV1_MF)_ENCODER' config.h || true
 
 echo ""
 echo "Configured filters/libs needed for capture and conversion:"
-grep -E 'CONFIG_(DDAGRAB|HWDOWNLOAD|SCALE|FORMAT|NULL)_FILTER|CONFIG_SWSCALE|CONFIG_(D3D11VA|DXVA2|MEDIAFOUNDATION)' config.h || true
+grep -E 'CONFIG_(DDAGRAB|HWDOWNLOAD|SCALE|FORMAT|NULL|LUTRGB)_FILTER|CONFIG_SWSCALE|CONFIG_(D3D11VA|DXVA2|MEDIAFOUNDATION)' config.h || true
 
 make -j"$(nproc)" V=0
 make install
@@ -499,7 +500,7 @@ try {
 
     Write-Host ""
     Write-Host "Filters:"
-    .\ffmpeg.exe -hide_banner -filters | Select-String "ddagrab|hwdownload|scale|format"
+    .\ffmpeg.exe -hide_banner -filters | Select-String "ddagrab|hwdownload|scale|format|lutrgb"
 
     Write-Host ""
     Write-Host "Decoders:"

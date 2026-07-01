@@ -205,21 +205,6 @@ func (t *videoSampleTimingTracker) Next(now time.Time) videoSampleTiming {
 	return timing
 }
 
-func initialProfileForGeometry(g Geometry) Profile {
-	pixels := g.Width * g.Height
-
-	switch {
-	case pixels <= 1280*720:
-		return mediumProfile24()
-	case pixels <= 1920*1080:
-		return mediumProfile24()
-	case pixels <= 2560*1440:
-		return highProfile24()
-	default:
-		return highProfile24()
-	}
-}
-
 func fixedProfileForQuality(quality string) (Profile, bool) {
 	switch strings.ToLower(strings.TrimSpace(quality)) {
 	case "low":
@@ -232,6 +217,23 @@ func fixedProfileForQuality(quality string) (Profile, bool) {
 		return ultraProfile24(), true
 	default:
 		return Profile{}, false
+	}
+}
+
+func initialProfileForGeometry(g Geometry) Profile {
+	pixels := g.Width * g.Height
+
+	switch {
+	case pixels <= 1280*720:
+		return mediumProfile24()
+	case pixels <= 1920*1080:
+		return mediumProfile24()
+	case pixels <= 2560*1440:
+		return highProfile24()
+	default:
+		// Даже для 4K/ultrawide не стартуем с ultra.
+		// Ultra можно получить позже только через стабильный upgrade.
+		return highProfile24()
 	}
 }
 
@@ -401,7 +403,7 @@ func (s *Stream) ffmpegArgsH264MF() []string {
 	args := s.ffmpegInputArgs()
 
 	args = append(args,
-		"-vf", "hwdownload,format=bgra,format=nv12",
+		"-vf", "hwdownload,format=bgra,lutrgb=r='floor(val/8)*8':g='floor(val/4)*4':b='floor(val/8)*8',format=nv12",
 		"-pix_fmt", "nv12",
 
 		"-c:v", "h264_mf",
@@ -455,8 +457,8 @@ func (s *Stream) ffmpegArgsVP8Libvpx() []string {
 	args := s.ffmpegInputArgs()
 
 	args = append(args,
-		"-c:v", "libvpx",
-		"-vf", "hwdownload,format=bgra",
+		"-vf", "hwdownload,format=bgra,lutrgb=r='floor(val/8)*8':g='floor(val/4)*4':b='floor(val/8)*8',format=yuv420p",
+		"-pix_fmt", "yuv420p",
 		"-deadline", "realtime",
 		"-cpu-used", "8",
 		"-lag-in-frames", "0",
@@ -1908,7 +1910,7 @@ func (s *Stream) readRTCP(ctx context.Context) {
 func lowProfile24() Profile {
 	return Profile{
 		FPS:          24,
-		BitrateKbps:  900,
+		BitrateKbps:  800,
 		MaxrateKbps:  1100,
 		BufsizeKbps:  650,
 		CRF:          38,
@@ -1919,7 +1921,7 @@ func lowProfile24() Profile {
 func mediumProfile24() Profile {
 	return Profile{
 		FPS:          24,
-		BitrateKbps:  1500,
+		BitrateKbps:  1400,
 		MaxrateKbps:  2900,
 		BufsizeKbps:  1200,
 		CRF:          34,
@@ -1930,7 +1932,7 @@ func mediumProfile24() Profile {
 func highProfile24() Profile {
 	return Profile{
 		FPS:          30,
-		BitrateKbps:  2800,
+		BitrateKbps:  2600,
 		MaxrateKbps:  5000,
 		BufsizeKbps:  1800,
 		CRF:          32,
@@ -1941,7 +1943,7 @@ func highProfile24() Profile {
 func ultraProfile24() Profile {
 	return Profile{
 		FPS:          30,
-		BitrateKbps:  5000,
+		BitrateKbps:  4800,
 		MaxrateKbps:  8000,
 		BufsizeKbps:  2600,
 		CRF:          30,
