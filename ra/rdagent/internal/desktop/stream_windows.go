@@ -399,7 +399,7 @@ func (s *Stream) ffmpegArgsVP8Libvpx() []string {
 		"-quality", "realtime",
 		"-drop-threshold", "10",
 
-		"-g", strconv.Itoa(p.FPS),
+		"-g", strconv.Itoa(p.FPS*2),
 		"-keyint_min", strconv.Itoa(p.FPS),
 
 		"-crf", strconv.Itoa(p.CRF),
