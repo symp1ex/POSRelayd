@@ -28,6 +28,15 @@ func Run(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("load identity: %w", err)
 	}
 
+	logger.RDAgent.Debugf(
+		"RD agent video config: quality=%s codec=%s encoder=%s force_keyframe_on_pli=%t pli_keyframe_cooldown_ms=%d",
+		cfg.VideoQuality,
+		cfg.VideoCodec,
+		cfg.VideoEncoder,
+		cfg.ForceKeyframeOnPLI,
+		cfg.PLIKeyframeCooldownMs,
+	)
+
 	wsClient := signaling.NewClient(cfg)
 	if err := wsClient.Connect(ctx); err != nil {
 		return err

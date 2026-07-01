@@ -18,6 +18,7 @@ def normalize_display_config(display_config):
 
     quality = str(display_config.get("quality") or "auto").strip().lower()
     codec = str(display_config.get("codec") or "h264").strip().lower()
+    force_keyframe_on_pli = display_config.get("force_keyframe_on_pli") is True
 
     if quality not in ("auto", "low", "medium", "high", "ultra"):
         service.logger.logger_service.warning(
@@ -37,6 +38,7 @@ def normalize_display_config(display_config):
     return {
         "quality": quality,
         "codec": codec,
+        "force_keyframe_on_pli": force_keyframe_on_pli,
     }
 
 
@@ -102,6 +104,7 @@ class RDAgentSupervisor:
             video_codec = display["codec"]
             video_encoder = video_encoder_for_codec(video_codec)
             video_quality = display["quality"]
+            force_keyframe_on_pli = display["force_keyframe_on_pli"]
 
             env = os.environ.copy()
             env["RD_WS_URL"] = self.ws_url
@@ -130,6 +133,9 @@ class RDAgentSupervisor:
                 "--video-encoder", video_encoder,
             ]
 
+            if force_keyframe_on_pli:
+                args.append("--force-keyframe-on-pli")
+
             try:
                 creationflags = 0
                 if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
@@ -152,7 +158,8 @@ class RDAgentSupervisor:
                 )
                 service.logger.logger_service.debug(
                     f"rd-agent log_path='{self.log_dir}', work_dir='{self.work_dir}', "
-                    f"video_quality='{video_quality}', video_codec='{video_codec}', video_encoder='{video_encoder}'"
+                    f"video_quality='{video_quality}', video_codec='{video_codec}', "
+                    f"video_encoder='{video_encoder}', force_keyframe_on_pli={force_keyframe_on_pli}"
                 )
                 return True
 
