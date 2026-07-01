@@ -411,7 +411,7 @@ func (s *Stream) ffmpegArgsH264MF() []string {
 
 		"-flags", "+low_delay",
 		"-bf", "0",
-		"-g", strconv.Itoa(p.FPS),
+		"-g", strconv.Itoa(p.FPS*2),
 		"-b:v", fmt.Sprintf("%dk", p.BitrateKbps),
 		"-maxrate", fmt.Sprintf("%dk", p.MaxrateKbps),
 		"-bufsize", fmt.Sprintf("%dk", p.BufsizeKbps),
@@ -1918,7 +1918,7 @@ func lowProfile24() Profile {
 
 func mediumProfile24() Profile {
 	return Profile{
-		FPS:          30,
+		FPS:          24,
 		BitrateKbps:  1500,
 		MaxrateKbps:  2900,
 		BufsizeKbps:  1200,
