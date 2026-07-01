@@ -113,12 +113,18 @@ type Stream struct {
 	pliCnt  atomic.Uint64
 	nackCnt atomic.Uint64
 
-	videoFramesSent         atomic.Uint64
-	videoBytesSent          atomic.Uint64
-	videoKeyframesSent      atomic.Uint64
-	videoSlowWrites         atomic.Uint64
-	videoMaxWriteNanos      atomic.Int64
-	videoLastSlowWriteNanos atomic.Int64
+	videoFramesSent             atomic.Uint64
+	videoBytesSent              atomic.Uint64
+	videoKeyframesSent          atomic.Uint64
+	videoSlowWrites             atomic.Uint64
+	videoMaxWriteNanos          atomic.Int64
+	videoArrivalGaps            atomic.Uint64
+	videoArrivalGapNanos        atomic.Uint64
+	videoMaxArrivalGapNanos     atomic.Int64
+	videoSampleDurationNanos    atomic.Uint64
+	videoMaxSampleDurationNanos atomic.Int64
+	videoSampleDurationClamped  atomic.Uint64
+	videoLastSlowWriteNanos     atomic.Int64
 
 	keyframeReqCh     chan keyframeRequest
 	lastKeyframeForce time.Time
@@ -139,6 +145,64 @@ func NewStream(sessionID string, track *webrtc.TrackLocalStaticSample, sender *w
 
 		keyframeReqCh: make(chan keyframeRequest, 1),
 	}, nil
+}
+
+type videoSampleTiming struct {
+	duration        time.Duration
+	arrivalGap      time.Duration
+	durationClamped bool
+}
+
+type videoSampleTimingTracker struct {
+	expected    time.Duration
+	minDuration time.Duration
+	maxDuration time.Duration
+	lastArrival time.Time
+}
+
+func newVideoSampleTimingTracker(fps int) videoSampleTimingTracker {
+	if fps <= 0 {
+		fps = 24
+	}
+
+	expected := time.Second / time.Duration(fps)
+	minDuration := expected / 2
+	if minDuration < 5*time.Millisecond {
+		minDuration = 5 * time.Millisecond
+	}
+
+	maxDuration := expected * 4
+	if maxDuration > 200*time.Millisecond {
+		maxDuration = 200 * time.Millisecond
+	}
+
+	return videoSampleTimingTracker{
+		expected:    expected,
+		minDuration: minDuration,
+		maxDuration: maxDuration,
+	}
+}
+
+func (t *videoSampleTimingTracker) Next(now time.Time) videoSampleTiming {
+	timing := videoSampleTiming{
+		duration: t.expected,
+	}
+
+	if !t.lastArrival.IsZero() {
+		timing.arrivalGap = now.Sub(t.lastArrival)
+		timing.duration = timing.arrivalGap
+
+		if timing.duration < t.minDuration {
+			timing.duration = t.minDuration
+			timing.durationClamped = true
+		} else if timing.duration > t.maxDuration {
+			timing.duration = t.maxDuration
+			timing.durationClamped = true
+		}
+	}
+
+	t.lastArrival = now
+	return timing
 }
 
 func initialProfileForGeometry(g Geometry) Profile {
@@ -352,6 +416,7 @@ func (s *Stream) ffmpegArgsH264MF() []string {
 		"-maxrate", fmt.Sprintf("%dk", p.MaxrateKbps),
 		"-bufsize", fmt.Sprintf("%dk", p.BufsizeKbps),
 
+		"-flush_packets", "1",
 		"-f", "h264",
 		"pipe:1",
 	)
@@ -375,6 +440,7 @@ func (s *Stream) ffmpegInputArgs() []string {
 	return []string{
 		"-hide_banner",
 		"-loglevel", "warning",
+		"-stats_period", "0.05",
 
 		"-f", "lavfi",
 		"-i", source,
@@ -409,6 +475,7 @@ func (s *Stream) ffmpegArgsVP8Libvpx() []string {
 
 		"-static-thresh", strconv.Itoa(p.StaticThresh),
 
+		"-flush_packets", "1",
 		"-f", "ivf",
 		"pipe:1",
 	)
@@ -436,6 +503,7 @@ func (s *Stream) ffmpegArgsAV1MF() []string {
 		"-maxrate", fmt.Sprintf("%dk", p.MaxrateKbps),
 		"-bufsize", fmt.Sprintf("%dk", p.BufsizeKbps),
 
+		"-flush_packets", "1",
 		"-f", "ivf",
 		"pipe:1",
 	)
@@ -802,7 +870,7 @@ func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 		return
 	}
 
-	frameDuration := time.Second / time.Duration(profile.FPS)
+	timingTracker := newVideoSampleTimingTracker(profile.FPS)
 	frameCount := 0
 	lastLog := time.Now()
 
@@ -822,6 +890,7 @@ func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 		}
 
 		keyframe := isIVFKeyframe(s.cfg.VideoCodec, frame)
+		timing := timingTracker.Next(time.Now())
 
 		frameCount++
 		if time.Since(lastLog) >= 2*time.Second {
@@ -830,7 +899,7 @@ func (s *Stream) forwardIVF(stdout io.Reader, profile Profile) {
 			lastLog = time.Now()
 		}
 
-		if err := s.writeVideoSample(frame, frameDuration, s.cfg.VideoCodec, keyframe); err != nil {
+		if err := s.writeVideoSample(frame, timing, s.cfg.VideoCodec, keyframe); err != nil {
 			logger.RDAgent.Errorf("write IVF video sample failed: %v", err)
 			return
 		}
@@ -906,7 +975,7 @@ func (s *Stream) forwardH264AnnexB(stdout io.Reader, profile Profile) {
 		return
 	}
 
-	frameDuration := time.Second / time.Duration(profile.FPS)
+	timingTracker := newVideoSampleTimingTracker(profile.FPS)
 	frameCount := 0
 	lastLog := time.Now()
 
@@ -928,6 +997,7 @@ func (s *Stream) forwardH264AnnexB(stdout io.Reader, profile Profile) {
 		}
 
 		keyframe := h264AnnexBHasIDR(accessUnit)
+		timing := timingTracker.Next(time.Now())
 
 		frameCount++
 		if time.Since(lastLog) >= 2*time.Second {
@@ -936,14 +1006,14 @@ func (s *Stream) forwardH264AnnexB(stdout io.Reader, profile Profile) {
 			lastLog = time.Now()
 		}
 
-		if err := s.writeVideoSample(accessUnit, frameDuration, "h264", keyframe); err != nil {
+		if err := s.writeVideoSample(accessUnit, timing, "h264", keyframe); err != nil {
 			logger.RDAgent.Errorf("write H264 video sample failed: %v", err)
 			return
 		}
 	}
 }
 
-func (s *Stream) writeVideoSample(data []byte, duration time.Duration, codec string, keyframe bool) error {
+func (s *Stream) writeVideoSample(data []byte, timing videoSampleTiming, codec string, keyframe bool) error {
 	s.markFrameSent()
 	if keyframe {
 		s.videoKeyframesSent.Add(1)
@@ -953,10 +1023,11 @@ func (s *Stream) writeVideoSample(data []byte, duration time.Duration, codec str
 	start := time.Now()
 	err := s.track.WriteSample(media.Sample{
 		Data:     data,
-		Duration: duration,
+		Duration: timing.duration,
 	})
 	elapsed := time.Since(start)
 
+	s.recordVideoSampleTiming(timing)
 	s.recordVideoWrite(len(data), elapsed)
 
 	if err != nil && err != io.ErrClosedPipe {
@@ -965,21 +1036,41 @@ func (s *Stream) writeVideoSample(data []byte, duration time.Duration, codec str
 	return nil
 }
 
+func (s *Stream) recordVideoSampleTiming(timing videoSampleTiming) {
+	s.videoSampleDurationNanos.Add(uint64(timing.duration.Nanoseconds()))
+	updateAtomicMaxDuration(&s.videoMaxSampleDurationNanos, timing.duration)
+
+	if timing.durationClamped {
+		s.videoSampleDurationClamped.Add(1)
+	}
+
+	if timing.arrivalGap <= 0 {
+		return
+	}
+
+	s.videoArrivalGaps.Add(1)
+	s.videoArrivalGapNanos.Add(uint64(timing.arrivalGap.Nanoseconds()))
+	updateAtomicMaxDuration(&s.videoMaxArrivalGapNanos, timing.arrivalGap)
+}
+
 func (s *Stream) recordVideoWrite(size int, elapsed time.Duration) {
 	s.videoFramesSent.Add(1)
 	s.videoBytesSent.Add(uint64(size))
 
-	nanos := elapsed.Nanoseconds()
-	for {
-		current := s.videoMaxWriteNanos.Load()
-		if nanos <= current || s.videoMaxWriteNanos.CompareAndSwap(current, nanos) {
-			break
-		}
-	}
-
+	updateAtomicMaxDuration(&s.videoMaxWriteNanos, elapsed)
 	if elapsed >= videoWriteSlowThreshold {
 		s.videoSlowWrites.Add(1)
 		s.videoLastSlowWriteNanos.Store(time.Now().UnixNano())
+	}
+}
+
+func updateAtomicMaxDuration(target *atomic.Int64, value time.Duration) {
+	nanos := value.Nanoseconds()
+	for {
+		current := target.Load()
+		if nanos <= current || target.CompareAndSwap(current, nanos) {
+			break
+		}
 	}
 }
 
@@ -1339,30 +1430,56 @@ func (s *Stream) watchLatencyStats(ctx context.Context) {
 			keyframes := s.videoKeyframesSent.Swap(0)
 			slowWrites := s.videoSlowWrites.Swap(0)
 			maxWrite := time.Duration(s.videoMaxWriteNanos.Swap(0))
+			arrivalGaps := s.videoArrivalGaps.Swap(0)
+			arrivalGapTotal := time.Duration(s.videoArrivalGapNanos.Swap(0))
+			maxArrivalGap := time.Duration(s.videoMaxArrivalGapNanos.Swap(0))
+			sampleDurationTotal := time.Duration(s.videoSampleDurationNanos.Swap(0))
+			maxSampleDuration := time.Duration(s.videoMaxSampleDurationNanos.Swap(0))
+			sampleDurationClamped := s.videoSampleDurationClamped.Swap(0)
 
 			if frames == 0 {
 				continue
 			}
 
+			avgArrivalGap := time.Duration(0)
+			if arrivalGaps > 0 {
+				avgArrivalGap = arrivalGapTotal / time.Duration(arrivalGaps)
+			}
+
+			avgSampleDuration := time.Duration(0)
+			if frames > 0 {
+				avgSampleDuration = sampleDurationTotal / time.Duration(frames)
+			}
+
 			if slowWrites > 0 {
 				logger.RDAgent.Warnf(
-					"Desktop video latency pressure: frames=%d bytes=%d keyframes=%d slow_writes=%d max_write=%s profile=%+v",
+					"Desktop video latency pressure: frames=%d bytes=%d keyframes=%d slow_writes=%d max_write=%s avg_arrival_gap=%s max_arrival_gap=%s avg_sample_duration=%s max_sample_duration=%s sample_duration_clamped=%d profile=%+v",
 					frames,
 					bytes,
 					keyframes,
 					slowWrites,
 					maxWrite,
+					avgArrivalGap,
+					maxArrivalGap,
+					avgSampleDuration,
+					maxSampleDuration,
+					sampleDurationClamped,
 					s.currentProfileSnapshot(),
 				)
 				continue
 			}
 
 			logger.RDAgent.Debugf(
-				"Desktop video latency stats: frames=%d bytes=%d keyframes=%d max_write=%s profile=%+v",
+				"Desktop video latency stats: frames=%d bytes=%d keyframes=%d max_write=%s avg_arrival_gap=%s max_arrival_gap=%s avg_sample_duration=%s max_sample_duration=%s sample_duration_clamped=%d profile=%+v",
 				frames,
 				bytes,
 				keyframes,
 				maxWrite,
+				avgArrivalGap,
+				maxArrivalGap,
+				avgSampleDuration,
+				maxSampleDuration,
+				sampleDurationClamped,
 				s.currentProfileSnapshot(),
 			)
 		}
