@@ -12,9 +12,11 @@ import (
 	"rdagent/internal/logger"
 )
 
-const version = "0.2.8.9"
+const version = "0.2.9.0"
 
 func main() {
+	dpiErr := diag.EnableDPIAwareness()
+
 	cfg, err := config.Parse(os.Args[1:])
 	if err != nil {
 		_, _ = os.Stderr.WriteString(err.Error() + "\n")
@@ -24,6 +26,12 @@ func main() {
 	logger.Configure(cfg.LogDir, cfg.LogLevel, cfg.LogRetainDays)
 
 	logger.RDAgent.Infof("rd-agent v%s starting...", version)
+	if dpiErr != nil {
+		logger.RDAgent.Warnf("DPI awareness setup warning: %v", dpiErr)
+	} else {
+		logger.RDAgent.Info("DPI awareness enabled")
+	}
+
 	logger.RDAgent.Debug(diag.CurrentTokenReport())
 	logger.RDAgent.Infof(
 		"Config: ws_url=%s client_id=%s session_id=%s instance_id=%s log_dir=%s log_level=%s log_retain_days=%d",
