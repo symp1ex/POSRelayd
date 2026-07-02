@@ -413,7 +413,7 @@ func (s *Stream) ffmpegArgsH264MF() []string {
 
 		"-flags", "+low_delay",
 		"-bf", "0",
-		"-g", strconv.Itoa(p.FPS*2),
+		"-g", strconv.Itoa(p.FPS*60),
 		"-b:v", fmt.Sprintf("%dk", p.BitrateKbps),
 		"-maxrate", fmt.Sprintf("%dk", p.MaxrateKbps),
 		"-bufsize", fmt.Sprintf("%dk", p.BufsizeKbps),
@@ -467,7 +467,7 @@ func (s *Stream) ffmpegArgsVP8Libvpx() []string {
 		"-quality", "realtime",
 		"-drop-threshold", "10",
 
-		"-g", strconv.Itoa(p.FPS*2),
+		"-g", strconv.Itoa(p.FPS*60),
 		"-keyint_min", strconv.Itoa(p.FPS),
 
 		"-crf", strconv.Itoa(p.CRF),
@@ -500,7 +500,7 @@ func (s *Stream) ffmpegArgsAV1MF() []string {
 
 		"-flags", "+low_delay",
 		"-bf", "0",
-		"-g", strconv.Itoa(p.FPS*2),
+		"-g", strconv.Itoa(p.FPS*60),
 		"-b:v", fmt.Sprintf("%dk", p.BitrateKbps),
 		"-maxrate", fmt.Sprintf("%dk", p.MaxrateKbps),
 		"-bufsize", fmt.Sprintf("%dk", p.BufsizeKbps),
@@ -1909,10 +1909,10 @@ func (s *Stream) readRTCP(ctx context.Context) {
 
 func lowProfile24() Profile {
 	return Profile{
-		FPS:          24,
-		BitrateKbps:  800,
-		MaxrateKbps:  1100,
-		BufsizeKbps:  650,
+		FPS:          16,
+		BitrateKbps:  1000,
+		MaxrateKbps:  1300,
+		BufsizeKbps:  200,
 		CRF:          38,
 		StaticThresh: 800,
 	}
@@ -1920,33 +1920,33 @@ func lowProfile24() Profile {
 
 func mediumProfile24() Profile {
 	return Profile{
-		FPS:          24,
+		FPS:          16,
 		BitrateKbps:  1400,
-		MaxrateKbps:  2900,
-		BufsizeKbps:  1200,
-		CRF:          34,
+		MaxrateKbps:  2200,
+		BufsizeKbps:  200,
+		CRF:          36,
 		StaticThresh: 600,
 	}
 }
 
 func highProfile24() Profile {
 	return Profile{
-		FPS:          30,
-		BitrateKbps:  2600,
-		MaxrateKbps:  5000,
-		BufsizeKbps:  1800,
-		CRF:          32,
+		FPS:          24,
+		BitrateKbps:  2300,
+		MaxrateKbps:  3100,
+		BufsizeKbps:  400,
+		CRF:          34,
 		StaticThresh: 500,
 	}
 }
 
 func ultraProfile24() Profile {
 	return Profile{
-		FPS:          30,
-		BitrateKbps:  4800,
-		MaxrateKbps:  8000,
-		BufsizeKbps:  2600,
-		CRF:          30,
+		FPS:          24,
+		BitrateKbps:  3200,
+		MaxrateKbps:  4100,
+		BufsizeKbps:  400,
+		CRF:          32,
 		StaticThresh: 350,
 	}
 }

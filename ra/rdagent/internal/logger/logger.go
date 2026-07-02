@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -56,19 +57,32 @@ func levelFromString(level string) slog.Level {
 }
 
 func (l Logger) Infof(format string, args ...any) {
-	l.Info(fmt.Sprintf(format, args...))
+	l.logf(slog.LevelInfo, format, args...)
 }
 
 func (l Logger) Debugf(format string, args ...any) {
-	l.Debug(fmt.Sprintf(format, args...))
+	l.logf(slog.LevelDebug, format, args...)
 }
 
 func (l Logger) Warnf(format string, args ...any) {
-	l.Warn(fmt.Sprintf(format, args...))
+	l.logf(slog.LevelWarn, format, args...)
 }
 
 func (l Logger) Errorf(format string, args ...any) {
-	l.Error(fmt.Sprintf(format, args...))
+	l.logf(slog.LevelError, format, args...)
+}
+
+func (l Logger) logf(level slog.Level, format string, args ...any) {
+	if l.Logger == nil {
+		return
+	}
+
+	ctx := context.Background()
+	if !l.Enabled(ctx, level) {
+		return
+	}
+
+	l.Log(ctx, level, fmt.Sprintf(format, args...))
 }
 
 func Get(name string) *slog.Logger {
